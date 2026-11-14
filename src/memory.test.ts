@@ -144,10 +144,14 @@ describe("MemoryService approve flow", () => {
    */
   it("keeps a proposal pending until its owner approves it", async () => {
     const { service, log } = freshService();
-    const proposal = await service.propose("sp-1", {
+    const proposed = await service.propose("sp-1", {
       id: "chg-1",
       description: "Update the sample account's lead contact.",
     });
+    if (!proposed.ok) {
+      throw new Error("expected the proposal to be stored");
+    }
+    const proposal = proposed.approval;
     expect(proposal.status).toBe("pending");
     await expect(service.getApproval("chg-1")).resolves.toMatchObject({
       status: "pending",
