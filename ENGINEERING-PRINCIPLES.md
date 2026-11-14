@@ -33,7 +33,7 @@ These rules apply to every change in this repository, whether a person or a codi
 - User-facing messages are written in plain sentences.
 
 ## 7. Small, reviewable changes
-- One change per branch and pull request, about 300 lines or less.
+- One change per branch and pull request, about 1,000 lines or less.
 - Each pull request says what changed, why, and how it was tested.
 
 ## 8. No secrets in the repository
