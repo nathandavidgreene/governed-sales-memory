@@ -78,8 +78,9 @@ export interface SearchDeps {
  * Atlas Vector Search ranks the caller's own memories by meaning,
  * pre-filtered to `owner_salesperson_id` equal to `ownerId` and
  * `forgotten` false. When embedding or the vector query fails — a
- * Voyage outage, a rate limit, a missing index — the keyword fallback
- * runs instead, searching the same owner's unforgotten memories by
+ * Voyage outage, a rate limit, a missing index — or the vector path
+ * finds nothing (for example memories stored without a vector), the
+ * keyword fallback runs instead, searching the same owner's unforgotten memories by
  * words. Both paths check every returned memory against the owner
  * rule a second time in code, so a leaked document is dropped rather
  * than returned. Fails closed on bad input: an empty owner, an empty
@@ -103,8 +104,14 @@ export async function searchMemories(
       queryVector,
       checked.limit,
     );
-    return toHits(docs, checked.ownerId);
+    const hits = toHits(docs, checked.ownerId);
+    if (hits.length > 0) {
+      return hits;
+    }
   } catch {
+    // Fall through to the keyword search below.
+  }
+  {
     const docs = await keywordSearch(
       deps.memories,
       checked.ownerId,

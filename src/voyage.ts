@@ -138,3 +138,20 @@ export function createVoyageEmbedder(
 ): (query: string) => Promise<number[]> {
   return (query: string) => embedQuery(apiKey, query);
 }
+
+/**
+ * Build a one-text document embedder bound to one API key, for
+ * embedding memory text when it is stored or corrected. Embeds as a
+ * "document" with the default model, one text per call — never a
+ * batch, to stay inside the free tier's rate limit. Throws on any
+ * failure, like `embedTexts`; the memory service catches that and
+ * stores the text without a vector.
+ */
+export function createVoyageDocumentEmbedder(
+  apiKey: string,
+): (text: string) => Promise<number[]> {
+  return async (text: string) => {
+    const [vector] = await embedTexts(apiKey, [text], "document");
+    return vector;
+  };
+}

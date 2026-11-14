@@ -75,4 +75,19 @@ describe("seed data", () => {
     );
     expect(owners).toEqual(salespersonIds);
   });
+
+  /**
+   * No seeded account is marked as a special starting point: none
+   * carries the old "ready_for_intake" status or a demo note, so
+   * acct_willow is an ordinary account like the rest.
+   */
+  it("marks no account ready for intake and carries no demo note", () => {
+    for (const account of seedState().accounts) {
+      expect(account.status).not.toBe("ready_for_intake");
+      expect(account).not.toHaveProperty("note");
+    }
+    const willow = seedState().accounts.find((account) => account.id === "acct_willow");
+    expect(willow).toBeDefined();
+    expect(willow).not.toHaveProperty("status");
+  });
 });

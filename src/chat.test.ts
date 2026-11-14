@@ -390,6 +390,41 @@ describe("propose and approve", () => {
   });
 });
 
+describe("list_products", () => {
+  /**
+   * list_products returns each product's name and sample rate label,
+   * read-only, and the tool descriptions tell the model to price
+   * proposals from it.
+   */
+  it("returns product names and rate labels without writing anything", async () => {
+    const model = new FakeModel([callTool("list_products", {}), say("Two products.")]);
+    const { chat, sessions, log } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP1);
+    const before = (await log.entries()).length;
+    await chat.handle(SP1, sessionId, "What can I sell?", () => Promise.resolve([]));
+    const results = toolResults(model);
+    expect(results).toContain("Managed Native Advertising");
+    expect(results).toContain("$5 CPC (per click)");
+    expect(results).toContain("sample price");
+    expect((await log.entries()).length).toBe(before);
+    const propose = model.lastTools.find((tool) => tool.function.name === "propose");
+    expect(propose?.function.description).toContain("list_products");
+  });
+
+  /** A product with no name falls back to its channel; one with no rate label is left out. */
+  it("names a product by its channel and skips unpriced products", async () => {
+    const model = new FakeModel([callTool("list_products", {}), say("Ok.")]);
+    const { chat, sessions, store } = await freshAgent(model);
+    await store.put("products", "prod_x", { _id: "prod_x", channel: "audio", rate_label: "$9 CPM" });
+    await store.put("products", "prod_y", { _id: "prod_y", name: "Unpriced" });
+    const sessionId = await mustOpen(sessions, SP1);
+    await chat.handle(SP1, sessionId, "Products?", () => Promise.resolve([]));
+    const results = toolResults(model);
+    expect(results).toContain('"name":"audio"');
+    expect(results).not.toContain("Unpriced");
+  });
+});
+
 describe("history and failure", () => {
   /**
    * The conversation, tool calls and results included, is saved on the

@@ -3,13 +3,13 @@
  *
  * Everything here is fictional sample data, labelled as samples wherever a
  * price or an account appears. The fixtures mirror the shape of the
- * seeded database, so tests exercise the same records the demo runs on
+ * seeded database, so tests exercise the same records the app runs on
  * against the database:
  *
- * - The Willow & Co. account (`acct_willow`) carries NO stakeholder map
- *   and NO budget. It is `ready_for_intake`: who the stakeholders are
- *   and what the budget is arrive in the intake conversation and are
- *   written as governed memory items, never read off the account.
+ * - Accounts carry NO stakeholder map and NO budget: those arrive in
+ *   conversation and are written as governed memory items, never read
+ *   off the account. No account is special; `acct_willow` is an
+ *   ordinary account like the rest.
  * - `acct_harbor` ("Harbor Street Media") belongs to the first
  *   salesperson too, so the second salesperson is the one refused on
  *   it; the second salesperson's own account is `acct_cabot_shore`.
@@ -50,10 +50,9 @@ export interface Product {
  * A customer account owned by exactly one salesperson, named by
  * `owner_salesperson_id`. `sample` is always `true`: accounts here are
  * fictional samples. An account deliberately carries no stakeholder map
- * and no budget — those live in governed memory, gathered from the
- * intake conversation. `status` is the account's plain-word state when
- * the seed gives it one; the demo's working account is the one whose
- * status is "ready_for_intake".
+ * and no budget — those live in governed memory, gathered in
+ * conversation. `status` is the account's plain-word state when the
+ * seed gives it one.
  */
 export interface Account {
   id: string;
@@ -101,7 +100,6 @@ export function seedState(): SeedState {
         id: "acct_willow",
         owner_salesperson_id: "acct_salesperson",
         name: "Willow & Co. (sample account)",
-        status: "ready_for_intake",
         sample: true,
       },
       {

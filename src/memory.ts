@@ -22,7 +22,7 @@
 
 import type { ChangeLog } from "./change-log";
 import { Outbox } from "./outbox";
-import type { Store } from "./store";
+import type { JsonRecord, Store } from "./store";
 
 /**
  * One correction made to a memory item: which field changed and what it
@@ -115,6 +115,16 @@ export type ApproveResult =
   | { ok: false; error: "already decided" }
   | { ok: false; error: "outbox write failed" };
 
+/**
+ * Embed one stored text as a document vector. Injected so the service
+ * never reads the environment and tests need no network; throws when
+ * embedding fails.
+ */
+export type EmbedDocument = (text: string) => Promise<number[]>;
+
+/** The field a memory's embedding vector is stored in; matches search. */
+const EMBEDDING_FIELD = "embedding";
+
 /** The collection memory items live in. */
 const ITEMS = "memories";
 
@@ -136,18 +146,53 @@ export class MemoryService {
   /** The outbox approvals are handed to; built over the same store. */
   private readonly outbox: Outbox;
 
-  /** Wrap the given store and change log; the service holds no state. */
+  /**
+   * Wrap the given store and change log; the service holds no state.
+   * `embed`, when given, embeds text on remember and correct so new
+   * and corrected memories are findable by vector search.
+   */
   constructor(
     private readonly store: Store,
     private readonly log: ChangeLog,
+    private readonly embed?: EmbedDocument,
   ) {
     this.outbox = new Outbox(store);
   }
 
   /**
+   * Embed one text for storage, failing soft: with no embedder, or
+   * when embedding throws (missing key, rate limit, outage), return
+   * `undefined` so the write goes ahead without a vector. One text per
+   * call — never a batch.
+   */
+  private async embedOrSkip(text: string): Promise<number[] | undefined> {
+    if (this.embed === undefined) {
+      return undefined;
+    }
+    try {
+      return await this.embed(text);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Build the stored document for an item: the item keyed by `_id`,
+   * plus its embedding when one was made.
+   */
+  private toDoc(item: MemoryItem, vector: number[] | undefined): JsonRecord {
+    const doc: JsonRecord = { _id: item.id, ...item };
+    if (vector !== undefined) {
+      doc[EMBEDDING_FIELD] = vector;
+    }
+    return doc;
+  }
+
+  /**
    * Store an item for `ownerSalespersonId` and append a "remember"
    * change log entry. Generates an id when the caller does not supply
-   * one. The entry names the item id only — never its content. The
+   * one. The text is embedded when an embedder is configured; if
+   * embedding fails the item is stored without a vector. The entry names the item id only — never its content. The
    * stored item carries `forgotten: false` so MongoDB
    * `{forgotten: false}` search filters match it.
    */
@@ -162,7 +207,8 @@ export class MemoryService {
       text: input.text,
       forgotten: false,
     };
-    await this.store.put(ITEMS, item.id, { _id: item.id, ...item });
+    const vector = await this.embedOrSkip(item.text);
+    await this.store.put(ITEMS, item.id, this.toDoc(item, vector));
     await this.log.append(
       ownerSalespersonId,
       "remember",
@@ -180,6 +226,7 @@ export class MemoryService {
    * ownership rule `propose` applies. A missing account gets the
    * generic refusal; someone else's account gets the generic refusal
    * and a "refuse" change log entry, and nothing is stored either way.
+   * The text is embedded as in `remember`, failing soft.
    */
   async rememberOnAccount(
     ownerSalespersonId: string,
@@ -207,7 +254,8 @@ export class MemoryService {
       forgotten: false,
       account_id: accountId,
     };
-    await this.store.put(ITEMS, item.id, { _id: item.id, ...item });
+    const vector = await this.embedOrSkip(item.text);
+    await this.store.put(ITEMS, item.id, this.toDoc(item, vector));
     await this.log.append(
       ownerSalespersonId,
       "remember",
@@ -284,7 +332,10 @@ export class MemoryService {
    * carrying content. Every failure is the one generic refusal: a
    * missing or forgotten item, another owner's item (also logged as
    * "refuse", item untouched), a field outside the allowlist, or a
-   * non-string value for an allowed field.
+   * non-string value for an allowed field. Correcting the text drops
+   * the stored embedding and re-embeds the new text, failing soft: if
+   * embedding fails the item is stored with no vector rather than a
+   * stale one.
    */
   async correct(
     requesterId: string,
@@ -311,8 +362,9 @@ export class MemoryService {
       return NOT_FOUND;
     }
     const at = new Date().toISOString();
+    const { [EMBEDDING_FIELD]: oldVector, ...withoutVector } = item;
     const corrected: MemoryItem & Record<string, unknown> = {
-      ...item,
+      ...withoutVector,
       [field]: value,
       correctedAt: at,
       history: [
@@ -320,7 +372,15 @@ export class MemoryService {
         { field, previous: item[field], at },
       ],
     };
-    await this.store.put(ITEMS, itemId, { _id: itemId, ...corrected });
+    // A text correction makes the old vector stale: it is dropped and
+    // replaced only if re-embedding succeeds. A kind correction keeps it.
+    const vector =
+      field === "text"
+        ? await this.embedOrSkip(value)
+        : Array.isArray(oldVector)
+          ? (oldVector as number[])
+          : undefined;
+    await this.store.put(ITEMS, itemId, this.toDoc(corrected, vector));
     await this.log.append(
       requesterId,
       "correct",
