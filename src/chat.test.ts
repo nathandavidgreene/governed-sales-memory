@@ -1,60 +1,97 @@
 /**
- * Tests for the demo layer: the scripted chat service end to end on
- * the seeded demo story (intake, proposal, approve, exactly one
- * outbox entry), close and resume at the exact saved step, correct
- * keeping the draft in history, forget removing the budget note's
- * content, the generic cross-owner refusal, the model seam's scripted
- * fallback — plus the Worker routes the demo page calls. The seeded
- * account record carries no stakeholders and no budget: both arrive
- * in the intake lines below and are written as governed memories,
- * which is the shape the demo runs on against the seeded database.
+ * Tests for the chat agent: a model with governed tools, run with a
+ * fake model client that plays back a fixed list of turns. They cover
+ * the owner rule through every tool (the second salesperson can never
+ * read, correct, or forget the first salesperson's Harbor memory), the
+ * model never choosing the owner, propose creating only a pending
+ * approval, the absence of any approve tool, history saved on the
+ * session, and model failure answered with an error rather than a
+ * canned line — plus the Worker routes the page calls.
  */
 
 import { describe, expect, it } from "vitest";
 
 import { ChangeLog } from "./change-log";
-import { ChatService } from "./chat";
+import { ChatService, parseArgs, storeSearch, type SearchFn } from "./chat";
 import type { WorkerEnv } from "./factory";
 import worker from "./index";
 import { MemoryService } from "./memory";
-import type { ModelClient } from "./model";
+import type {
+  AssistantTurn,
+  ChatMessage,
+  ModelClient,
+  ToolDefinition,
+} from "./model";
 import { Outbox } from "./outbox";
 import { seededStore } from "./seed";
 import { SessionService } from "./session";
 import type { Store } from "./store";
 
-/** The demo story's first salesperson, owner of the Willow & Co. account. */
+/** The first salesperson, owner of the Harbor Street Media account. */
 const SP1 = "acct_salesperson";
 
-/** The demo story's second salesperson, owner of the other account. */
+/** The second salesperson, who must never see SP1's memories. */
 const SP2 = "acct_salesperson_2";
 
-/**
- * The demo's intake line for Willow & Co.: the stakeholders and the
- * $40,000 budget exist only in this conversation — the account record
- * holds neither — and the roles are stated the wrong way round (Dan
- * as CMO), which the correction beat then swaps.
- */
-const INTAKE =
-  "Willow & Co.: Dan is the CMO, Priya runs operations, " +
-  "and the budget is $40,000 a month.";
+/** SP1's Harbor memory, the one SP2 must never reach. */
+const HARBOR_ITEM = "mem_harbor_cmo";
 
-/** The second salesperson's intake line, for their own account. */
-const INTAKE_CABOT_SHORE =
-  "Cabot Shore: Sam is the owner, Lee runs operations, " +
-  "and the budget is $9,500 a month.";
+/** The Harbor memory's text; must never appear in anything SP2 gets. */
+const HARBOR_TEXT = "The CMO at Harbor Street Media is Jordan Hale.";
 
 /** The environment the route tests run under: in-memory store allowed. */
 const TEST_ENV: WorkerEnv = { ALLOW_IN_MEMORY_STORE: "true" };
 
 /**
- * Build a fresh chat service and the governed services under it, all
- * over one store loaded with the sample seed, so a test can drive the
- * conversation against the seeded accounts and assert on memory,
- * outbox, sessions, and the change log together. An optional model
- * client exercises the free-form seam.
+ * A fake model client that returns the given turns in order and
+ * records every conversation it was sent, so a test can script the
+ * model's tool calls and inspect what the model saw. Throws once the
+ * turns run out, like a failing model.
  */
-async function freshChat(model?: ModelClient): Promise<{
+class FakeModel implements ModelClient {
+  /** Every message list the agent sent, one per call. */
+  readonly calls: ChatMessage[][] = [];
+
+  /** The tool definitions sent with the most recent call. */
+  lastTools: ToolDefinition[] = [];
+
+  /** Hold the turns to play back. */
+  constructor(private readonly turns: AssistantTurn[]) {}
+
+  /** Record the call and return the next turn, or throw when none is left. */
+  chat(messages: ChatMessage[], tools: ToolDefinition[]): Promise<AssistantTurn> {
+    this.calls.push(structuredClone(messages));
+    this.lastTools = tools;
+    const next = this.turns.shift();
+    if (next === undefined) {
+      return Promise.reject(new Error("no more turns"));
+    }
+    return Promise.resolve(next);
+  }
+}
+
+/** Build a model turn that calls one tool with the given arguments. */
+function callTool(name: string, args: unknown, id = `call-${name}`): AssistantTurn {
+  return {
+    content: null,
+    tool_calls: [
+      { id, type: "function", function: { name, arguments: JSON.stringify(args) } },
+    ],
+  };
+}
+
+/** Build a model turn that answers with plain text. */
+function say(text: string): AssistantTurn {
+  return { content: text, tool_calls: [] };
+}
+
+/**
+ * Build a fresh agent and the governed services under it over one
+ * seeded store, with SP1's Harbor memory added, so a test can drive
+ * the agent and assert on memory, approvals, outbox, sessions, and the
+ * change log together.
+ */
+async function freshAgent(model?: ModelClient): Promise<{
   chat: ChatService;
   memory: MemoryService;
   sessions: SessionService;
@@ -63,791 +100,428 @@ async function freshChat(model?: ModelClient): Promise<{
   store: Store;
 }> {
   const store = await seededStore();
+  await store.put("memories", HARBOR_ITEM, {
+    _id: HARBOR_ITEM,
+    account_id: "acct_harbor",
+    kind: "stakeholder",
+    owner_salesperson_id: SP1,
+    forgotten: false,
+    text: HARBOR_TEXT,
+  });
   const log = new ChangeLog(store);
   const memory = new MemoryService(store, log);
   const sessions = new SessionService(store, log);
-  const outbox = new Outbox(store);
   const chat = new ChatService(memory, sessions, store, model);
-  return { chat, memory, sessions, outbox, log, store };
+  return { chat, memory, sessions, outbox: new Outbox(store), log, store };
 }
 
-describe("scripted chat demo path", () => {
+/** Open a session that must succeed and return its id. */
+async function mustOpen(sessions: SessionService, owner: string): Promise<string> {
+  const opened = await sessions.open(owner);
+  if (!opened.ok) {
+    throw new Error(`open failed: ${opened.error}`);
+  }
+  return opened.session.id;
+}
+
+/** Collect every tool result the agent fed back to the model, as text. */
+function toolResults(model: FakeModel): string {
+  return model.calls
+    .flat()
+    .filter((message) => message.role === "tool")
+    .map((message) => message.content)
+    .join("\n");
+}
+
+describe("sessions are tied only to their owner", () => {
   /**
-   * The full path on the seeded story: open a session on Willow & Co.,
-   * run intake, confirm the stakeholders, get a pending proposal with
-   * sample prices, approve it, and find exactly one outbox entry — a
-   * second approve attempt fails closed and adds no entry — then
-   * watch chat notice the approval and advance to the approved step.
+   * A new session names no account and no step, starts with an empty
+   * history, and records a session-open change log entry.
    */
-  it("runs intake to proposal to approval with exactly one outbox entry", async () => {
-    const { chat, memory, outbox } = await freshChat();
-    const opened = await chat.openSession(SP1);
+  it("opens an empty session with no account or step", async () => {
+    const { sessions, log } = await freshAgent();
+    const opened = await sessions.open(SP1);
     expect(opened.ok).toBe(true);
     if (!opened.ok) {
       return;
     }
-    const sessionId = opened.session.id;
-    expect(opened.session.accountId).toBe("acct_willow");
-    expect(opened.session.step).toBe("intake");
+    expect(opened.session.history).toEqual([]);
+    expect(opened.session).not.toHaveProperty("accountId");
+    expect(opened.session).not.toHaveProperty("step");
+    const entries = await log.entries();
+    expect(entries.at(-1)?.action).toBe("session-open");
+  });
 
-    const intake = await chat.handle(SP1, sessionId, INTAKE);
-    expect(intake.ok).toBe(true);
-    if (!intake.ok) {
-      return;
-    }
-    expect(intake.step).toBe("stakeholders");
-    expect(intake.reply).toContain("Willow & Co.");
-    expect(intake.reply).toContain("Dan — CMO");
-    expect(intake.reply).toContain("Priya — operations");
-    expect(intake.reply).toContain("$40,000");
-
-    const proposed = await chat.handle(SP1, sessionId, "looks good");
-    expect(proposed.ok).toBe(true);
-    if (!proposed.ok) {
-      return;
-    }
-    expect(proposed.step).toBe("proposal");
-    expect(proposed.pendingApproval).toBeDefined();
-    expect(proposed.pendingApproval?.description).toContain("$5 CPC");
-    expect(proposed.pendingApproval?.description).toContain("$25 vCPM");
-    expect(proposed.pendingApproval?.description).toContain("sample price");
-    const approvalId = proposed.pendingApproval?.id as string;
-
-    await expect(outbox.list(SP1)).resolves.toEqual([]);
-    const approved = await memory.approve(SP1, approvalId);
-    expect(approved.ok).toBe(true);
-    const entries = await outbox.list(SP1);
-    expect(entries).toHaveLength(1);
-    expect(entries[0].approvalId).toBe(approvalId);
-    await expect(outbox.list(SP2)).resolves.toEqual([]);
-
-    await expect(memory.approve(SP1, approvalId)).resolves.toEqual({
+  /** An id that is not a known salesperson gets the generic refusal. */
+  it("refuses to open a session for an unknown salesperson", async () => {
+    const { sessions } = await freshAgent();
+    await expect(sessions.open("acct_nobody")).resolves.toEqual({
       ok: false,
-      error: "already decided",
+      error: "not found",
     });
-    await expect(outbox.list(SP1)).resolves.toHaveLength(1);
-
-    const after = await chat.handle(SP1, sessionId, "thanks");
-    expect(after.ok).toBe(true);
-    if (after.ok) {
-      expect(after.step).toBe("approved");
-    }
-  });
-
-  /**
-   * Before the proposal is approved, a further message does not
-   * advance anything: the reply points at the approval card and the
-   * same pending approval rides along.
-   */
-  it("holds at the proposal step until the approval happens", async () => {
-    const { chat } = await freshChat();
-    const opened = await chat.openSession(SP2);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    const sessionId = opened.session.id;
-    await chat.handle(SP2, sessionId, INTAKE_CABOT_SHORE);
-    const proposed = await chat.handle(SP2, sessionId, "go ahead");
-    if (!proposed.ok) {
-      throw new Error("proposal failed");
-    }
-    const waiting = await chat.handle(SP2, sessionId, "and then?");
-    expect(waiting.ok).toBe(true);
-    if (waiting.ok) {
-      expect(waiting.step).toBe("proposal");
-      expect(waiting.pendingApproval?.id).toBe(proposed.pendingApproval?.id);
-      expect(waiting.reply).toContain("waiting for your approval");
-    }
-  });
-
-  /**
-   * Opening a session for an id that owns no account in the store
-   * fails closed instead of inventing an account.
-   */
-  it("fails closed when the salesperson owns no account", async () => {
-    const { chat } = await freshChat();
-    await expect(chat.openSession("acct_unknown")).resolves.toEqual({
+    await expect(sessions.open("acct_harbor")).resolves.toEqual({
       ok: false,
-      error: "no account",
+      error: "not found",
     });
   });
 });
 
-describe("the seeded account shape", () => {
+describe("the owner rule through every tool", () => {
   /**
-   * The regression that matters: the seeded Willow & Co. record has
-   * no stakeholders field and no budget — it is ready for intake —
-   * and the accounts collection also holds the salespeople's own
-   * rows. The demo still opens on Willow & Co. (the account marked
-   * ready for intake, not the salesperson row and not Harbor Street
-   * Media), and the second salesperson opens on their own account.
+   * SP2 searches for the CMO: even with a search layer that leaks
+   * Harbor's memory, the agent drops it, so neither the model nor the
+   * reply ever sees the Harbor text.
    */
-  it("opens on the ready-for-intake account, never a salesperson row", async () => {
-    const { chat, store } = await freshChat();
-    const willow = await store.get("accounts", "acct_willow");
-    expect(willow).toBeDefined();
-    expect(willow).not.toHaveProperty("stakeholders");
-    expect(willow).not.toHaveProperty("budget");
-    expect(willow?.status).toBe("ready_for_intake");
-    const rows = await store.list("accounts");
-    expect(rows.some((row) => row.kind === "salesperson")).toBe(true);
-
-    const first = await chat.openSession(SP1);
-    expect(first.ok).toBe(true);
-    if (first.ok) {
-      expect(first.session.accountId).toBe("acct_willow");
-    }
-    const second = await chat.openSession(SP2);
-    expect(second.ok).toBe(true);
-    if (second.ok) {
-      expect(second.session.accountId).toBe("acct_cabot_shore");
-    }
-  });
-
-  /**
-   * An opening message that names no stakeholders starts nothing:
-   * the session stays at intake, the reply asks for the intake
-   * details, and no memory is written — the chat never falls back to
-   * a stakeholder map stored on the account, because there is none.
-   * The intake line that follows then runs the path as usual.
-   */
-  it("writes nothing at intake until the conversation names stakeholders", async () => {
-    const { chat, store } = await freshChat();
-    const opened = await chat.openSession(SP1);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    const sessionId = opened.session.id;
-    const reply = await chat.handle(SP1, sessionId, "hello");
-    expect(reply.ok).toBe(true);
-    if (reply.ok) {
-      expect(reply.step).toBe("intake");
-      expect(reply.reply).toContain("stakeholder");
-    }
-    await expect(store.list("memories")).resolves.toEqual([]);
-
-    const intake = await chat.handle(SP1, sessionId, INTAKE);
-    expect(intake.ok).toBe(true);
-    if (intake.ok) {
-      expect(intake.step).toBe("stakeholders");
-    }
-    const memories = await store.list("memories");
-    expect(memories.map((item) => item.kind).sort()).toEqual([
-      "budget",
-      "stakeholders",
+  it("never returns Harbor's memory to SP2 from search, even if search leaks", async () => {
+    const model = new FakeModel([
+      callTool("search_memories", { query: "who is the chief marketing officer" }),
+      say("I have no record of that."),
     ]);
-  });
-});
-
-describe("session close and resume through chat", () => {
-  /**
-   * Closing a session mid-path and resuming it lands on the exact
-   * saved step with the saved data; while closed, chat refuses to run.
-   */
-  it("resumes at the exact step and data after a close", async () => {
-    const { chat, sessions } = await freshChat();
-    const opened = await chat.openSession(SP1);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    const sessionId = opened.session.id;
-    await chat.handle(SP1, sessionId, INTAKE);
-
-    const closed = await sessions.close(sessionId, SP1);
-    expect(closed.ok).toBe(true);
-    await expect(chat.handle(SP1, sessionId, "hello again")).resolves.toEqual(
-      { ok: false, error: "not open" },
-    );
-
-    const resumed = await sessions.resume(sessionId, SP1);
-    expect(resumed.ok).toBe(true);
-    if (resumed.ok) {
-      expect(resumed.session.step).toBe("stakeholders");
-      expect(resumed.session.data.stakeholderItemId).toBe(
-        `stakeholders-${sessionId}`,
-      );
-      expect(resumed.session.status).toBe("open");
-    }
-  });
-});
-
-describe("correct and forget through chat", () => {
-  /**
-   * Correcting the stakeholder note through chat swaps the roles the
-   * intake conversation stated, through the memory service: the
-   * recalled note reads corrected (Priya is the CMO, Dan runs
-   * operations), the intake's version survives as the previous value
-   * in the note's history, and the proposal built afterwards is built
-   * from the corrected note — the memory on record changed what the
-   * agent does next.
-   */
-  it("corrects the stakeholder note and keeps the draft in history", async () => {
-    const { chat, memory } = await freshChat();
-    const opened = await chat.openSession(SP1);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    const sessionId = opened.session.id;
-    await chat.handle(SP1, sessionId, INTAKE);
-    const itemId = `stakeholders-${sessionId}`;
-
-    const before = await memory.recall(SP1, itemId);
-    expect(before.ok).toBe(true);
-    if (before.ok) {
-      expect(before.item.text).toContain("Dan — CMO");
-      expect(before.item.text).toContain("Priya — operations");
-    }
-
-    const reply = await chat.handle(
-      SP1,
-      sessionId,
-      "Correction — Priya is the CMO, not Dan",
-    );
-    expect(reply.ok).toBe(true);
-    if (reply.ok) {
-      expect(reply.reply).toContain("Corrected");
-    }
-
-    const after = await memory.recall(SP1, itemId);
-    expect(after.ok).toBe(true);
-    if (after.ok) {
-      expect(after.item.text).toContain("Priya — CMO");
-      expect(after.item.text).toContain("Dan — operations");
-      expect(after.item.history).toHaveLength(1);
-      expect(after.item.history?.[0].field).toBe("text");
-      expect(after.item.history?.[0].previous).toContain("Dan — CMO");
-    }
-
-    const proposed = await chat.handle(SP1, sessionId, "looks good");
-    expect(proposed.ok).toBe(true);
-    if (proposed.ok) {
-      expect(proposed.pendingApproval?.description).toContain("Priya — CMO");
-      expect(proposed.pendingApproval?.description).not.toContain("Dan — CMO");
-    }
+    const { chat, sessions } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP2);
+    const leaky: SearchFn = () =>
+      Promise.resolve([
+        { id: HARBOR_ITEM, text: HARBOR_TEXT, owner_salesperson_id: SP1 },
+      ]);
+    const result = await chat.handle(SP2, sessionId, "Who is the CMO?", leaky);
+    expect(result.ok).toBe(true);
+    expect(toolResults(model)).not.toContain("Jordan Hale");
+    expect(toolResults(model)).toContain('"memories":[]');
   });
 
   /**
-   * Forgetting the budget note through chat removes its content: the
-   * owner can no longer recall it, and the stored record is a
-   * tombstone with no text left in it. The figure in the note is the
-   * demo story's $40,000 budget.
+   * With the real keyword search over the store, SP2 finds nothing of
+   * SP1's, while SP1 asking the same question does find the Harbor
+   * memory — the owner is the only thing that differs.
    */
-  it("forgets the budget note so its content is gone", async () => {
-    const { chat, memory, store } = await freshChat();
-    const opened = await chat.openSession(SP1);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    const sessionId = opened.session.id;
-    await chat.handle(SP1, sessionId, INTAKE);
-    await chat.handle(SP1, sessionId, "looks good");
-    const budgetId = `budget-${sessionId}`;
-
-    const before = await memory.recall(SP1, budgetId);
-    expect(before.ok).toBe(true);
-    if (before.ok) {
-      expect(before.item.text).toContain("$40,000");
-    }
-
-    const reply = await chat.handle(SP1, sessionId, "forget the budget");
-    expect(reply.ok).toBe(true);
-    if (reply.ok) {
-      expect(reply.reply).toContain("forgotten");
-    }
-
-    await expect(memory.recall(SP1, budgetId)).resolves.toEqual({
-      ok: false,
-      error: "not found",
-    });
-    const tombstone = await store.get("memories", budgetId);
-    expect(tombstone?.forgotten).toBe(true);
-    expect(tombstone?.text).toBeUndefined();
+  it("scopes the store search to the caller", async () => {
+    const { store } = await freshAgent();
+    const search = storeSearch(store);
+    const forSp2 = await search(SP2, "CMO Harbor Street Media", 5);
+    expect(forSp2.map((hit) => hit.id)).not.toContain(HARBOR_ITEM);
+    const forSp1 = await search(SP1, "CMO Harbor Street Media", 5);
+    expect(forSp1.map((hit) => hit.id)).toContain(HARBOR_ITEM);
   });
 
   /**
-   * The budget figure can also arrive after the intake line — here in
-   * the confirmation message — and is still written as a budget
-   * memory through the same governed path, ready to be forgotten.
-   * The intake conversation is the source either way; the account
-   * record never carries a budget.
+   * SP2's agent tries to correct Harbor's memory: the generic refusal
+   * comes back, the memory is unchanged, and the attempt is logged.
    */
-  it("writes the budget note when the figure arrives after intake", async () => {
-    const { chat, memory } = await freshChat();
-    const opened = await chat.openSession(SP1);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    const sessionId = opened.session.id;
-    await chat.handle(
-      SP1,
-      sessionId,
-      "Willow & Co.: Dan is the CMO, Priya runs operations.",
-    );
-    const budgetId = `budget-${sessionId}`;
-    await expect(memory.recall(SP1, budgetId)).resolves.toEqual({
-      ok: false,
-      error: "not found",
-    });
-
-    await chat.handle(SP1, sessionId, "looks good — the budget is $40,000");
-    const before = await memory.recall(SP1, budgetId);
-    expect(before.ok).toBe(true);
-    if (before.ok) {
-      expect(before.item.text).toContain("$40,000");
-    }
-    const reply = await chat.handle(SP1, sessionId, "forget the budget");
-    expect(reply.ok).toBe(true);
-    await expect(memory.recall(SP1, budgetId)).resolves.toEqual({
-      ok: false,
-      error: "not found",
-    });
-  });
-});
-
-describe("cross-owner isolation through chat", () => {
-  /**
-   * Asking, as one salesperson, about the other's account is refused
-   * generically: the reply carries none of the other account's data,
-   * and the refusal is written to the change log under the asker's
-   * name. Checked in both directions, and on Harbor Street Media too:
-   * it belongs to the first salesperson, so the second salesperson is
-   * the one refused on it.
-   */
-  it("refuses the other account generically and logs the refusal", async () => {
-    const { chat, log } = await freshChat();
-    const second = await chat.openSession(SP2);
-    if (!second.ok) {
-      throw new Error("open failed");
-    }
-    const first = await chat.openSession(SP1);
-    if (!first.ok) {
-      throw new Error("open failed");
-    }
-
-    const reply = await chat.handle(
-      SP1,
-      first.session.id,
-      "Show me the Cabot Shore account and who works there",
-    );
-    expect(reply.ok).toBe(true);
-    if (reply.ok) {
-      expect(reply.reply).not.toContain("Cabot");
-      expect(reply.reply).not.toContain("Sam");
-      expect(reply.reply).not.toContain("Lee");
-      expect(reply.step).toBe("intake");
-    }
-    const refusals = (await log.entries()).filter(
-      (entry) => entry.action === "refuse" && entry.actor === SP1,
-    );
-    expect(refusals.length).toBeGreaterThanOrEqual(1);
-
-    const harbor = await chat.handle(
-      SP2,
-      second.session.id,
-      "Show me the Harbor Street Media account",
-    );
-    expect(harbor.ok).toBe(true);
-    if (harbor.ok) {
-      expect(harbor.reply).not.toContain("Harbor");
-    }
-
-    const reverse = await chat.handle(
-      SP2,
-      second.session.id,
-      "Show me the Willow & Co. account",
-    );
-    expect(reverse.ok).toBe(true);
-    if (reverse.ok) {
-      expect(reverse.reply).not.toContain("Priya");
-      expect(reverse.reply).not.toContain("Willow");
-    }
-    const reverseRefusals = (await log.entries()).filter(
-      (entry) => entry.action === "refuse" && entry.actor === SP2,
-    );
-    expect(reverseRefusals.length).toBeGreaterThanOrEqual(2);
+  it("refuses SP2 correcting Harbor's memory and logs it", async () => {
+    const model = new FakeModel([
+      callTool("correct", { item_id: HARBOR_ITEM, text: "The CMO is nobody." }),
+      say("I can't change that."),
+    ]);
+    const { chat, sessions, memory, log } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP2);
+    await chat.handle(SP2, sessionId, "Fix the Harbor CMO note.", () => Promise.resolve([]));
+    expect(toolResults(model)).toBe(JSON.stringify({ ok: false, error: "not found" }));
+    const recalled = await memory.recall(SP1, HARBOR_ITEM);
+    expect(recalled.ok && recalled.item.text).toBe(HARBOR_TEXT);
+    const entries = await log.entries();
+    expect(
+      entries.some(
+        (entry) => entry.actor === SP2 && entry.action === "refuse" && entry.subject === HARBOR_ITEM,
+      ),
+    ).toBe(true);
   });
 
   /**
-   * A session itself is owner-scoped: handling a message in another
-   * salesperson's session gets the generic refusal before any script
-   * runs — the same answer as a session that does not exist.
+   * SP2's agent tries to forget Harbor's memory: the generic refusal
+   * comes back, SP1 can still read it, and the attempt is logged.
    */
-  it("refuses a message in another salesperson's session", async () => {
-    const { chat } = await freshChat();
-    const opened = await chat.openSession(SP1);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    await expect(
-      chat.handle(SP2, opened.session.id, "hello"),
-    ).resolves.toEqual({ ok: false, error: "not found" });
-  });
-});
-
-describe("model seam fallback", () => {
-  /**
-   * Drive one conversation to the proposal step and return its
-   * session id, so each model test can approve and step past the
-   * demo path to the free-form point.
-   */
-  async function toProposalStep(chat: ChatService): Promise<string> {
-    const opened = await chat.openSession(SP1);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    const sessionId = opened.session.id;
-    await chat.handle(SP1, sessionId, INTAKE);
-    const proposed = await chat.handle(SP1, sessionId, "looks good");
-    if (!proposed.ok || proposed.pendingApproval === undefined) {
-      throw new Error("proposal failed");
-    }
-    return sessionId;
-  }
-
-  /**
-   * With no model configured, a free-form message after the demo path
-   * gets the scripted fallback reply.
-   */
-  it("answers free-form messages with the scripted reply when no model is configured", async () => {
-    const { chat, memory } = await freshChat();
-    const sessionId = await toProposalStep(chat);
-    const approvalId = await currentApprovalId(chat, sessionId);
-    await memory.approve(SP1, approvalId);
-    await chat.handle(SP1, sessionId, "thanks");
-    const free = await chat.handle(SP1, sessionId, "What else should I know?");
-    expect(free.ok).toBe(true);
-    if (free.ok) {
-      expect(free.reply).toContain("approved and in the outbox");
-    }
+  it("refuses SP2 forgetting Harbor's memory and logs it", async () => {
+    const model = new FakeModel([
+      callTool("forget", { item_id: HARBOR_ITEM }),
+      say("I can't remove that."),
+    ]);
+    const { chat, sessions, memory, log } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP2);
+    await chat.handle(SP2, sessionId, "Forget the Harbor CMO.", () => Promise.resolve([]));
+    expect(toolResults(model)).toBe(JSON.stringify({ ok: false, error: "not found" }));
+    expect((await memory.recall(SP1, HARBOR_ITEM)).ok).toBe(true);
+    const entries = await log.entries();
+    expect(entries.filter((entry) => entry.action === "forget")).toEqual([]);
+    expect(entries.at(-1)).toMatchObject({ actor: SP2, action: "refuse", subject: HARBOR_ITEM });
   });
 
   /**
-   * A model that fails is invisible to the conversation: the reply is
-   * the scripted fallback, exactly as if no model were configured.
+   * SP2 remembering or proposing against SP1's Harbor account gets the
+   * generic refusal; nothing is stored and both attempts are logged.
    */
-  it("falls back to the scripted reply when the model call fails", async () => {
-    const failing: ModelClient = {
-      complete: () => Promise.reject(new Error("model unavailable")),
-    };
-    const { chat, memory } = await freshChat(failing);
-    const sessionId = await toProposalStep(chat);
-    const approvalId = await currentApprovalId(chat, sessionId);
-    await memory.approve(SP1, approvalId);
-    await chat.handle(SP1, sessionId, "thanks");
-    const free = await chat.handle(SP1, sessionId, "What else should I know?");
-    expect(free.ok).toBe(true);
-    if (free.ok) {
-      expect(free.reply).toContain("approved and in the outbox");
-    }
-  });
-
-  /**
-   * A working model writes replies only for messages that match no
-   * governed intent: the demo intents (intake with stakeholders, the
-   * confirmation that builds the proposal, the approval transition)
-   * stay scripted and never call it, while a no-intent message at any
-   * step — here "still waiting" at the proposal step — is answered by
-   * the model, with the pending approval still riding along.
-   */
-  it("uses the model only for messages with no governed intent, never for demo intents", async () => {
-    let calls = 0;
-    const working: ModelClient = {
-      complete: () => {
-        calls += 1;
-        return Promise.resolve("A short model-written answer.");
+  it("refuses remember and propose on another owner's account", async () => {
+    const model = new FakeModel([
+      {
+        content: null,
+        tool_calls: [
+          {
+            id: "a",
+            type: "function",
+            function: {
+              name: "remember",
+              arguments: JSON.stringify({ account_id: "acct_harbor", text: "x", kind: "note" }),
+            },
+          },
+          {
+            id: "b",
+            type: "function",
+            function: {
+              name: "propose",
+              arguments: JSON.stringify({ account_id: "acct_harbor", summary: "x" }),
+            },
+          },
+        ],
       },
-    };
-    const { chat, memory } = await freshChat(working);
-    const sessionId = await toProposalStep(chat);
-    expect(calls).toBe(0);
-    const approvalId = await currentApprovalId(chat, sessionId);
-    expect(calls).toBe(1);
-    await memory.approve(SP1, approvalId);
-    await chat.handle(SP1, sessionId, "thanks");
-    expect(calls).toBe(1);
-    const free = await chat.handle(SP1, sessionId, "What else should I know?");
-    expect(free.ok).toBe(true);
-    if (free.ok) {
-      expect(free.reply).toBe("A short model-written answer.");
-    }
-    expect(calls).toBe(2);
-  });
-
-  /**
-   * At the intake step, a question that names no stakeholders is
-   * answered by the model when one is configured; the session stays
-   * at intake and nothing is written to memory.
-   */
-  it("answers an off-script question at intake with the model and holds the step", async () => {
-    const working: ModelClient = {
-      complete: () => Promise.resolve("Earth has one moon."),
-    };
-    const { chat, memory } = await freshChat(working);
-    const opened = await chat.openSession(SP1);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    const reply = await chat.handle(
-      SP1,
-      opened.session.id,
-      "how many moons does earth have?",
+      say("Not available."),
+    ]);
+    const { chat, sessions, store, log } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP2);
+    const before = (await store.list("memories")).length;
+    await chat.handle(SP2, sessionId, "Add a Harbor note.", () => Promise.resolve([]));
+    expect((await store.list("memories")).length).toBe(before);
+    expect(await store.list("approvals")).toEqual([]);
+    const refusals = (await log.entries()).filter(
+      (entry) => entry.action === "refuse" && entry.subject === "acct_harbor",
     );
-    expect(reply.ok).toBe(true);
-    if (reply.ok) {
-      expect(reply.reply).toBe("Earth has one moon.");
-      expect(reply.step).toBe("intake");
-    }
-    await expect(memory.recall(SP1, `stakeholders-${opened.session.id}`)).resolves.toEqual({
-      ok: false,
-      error: "not found",
-    });
+    expect(refusals.length).toBe(2);
   });
 
+  /** list_my_accounts returns only the caller's client accounts. */
+  it("lists only the caller's own client accounts", async () => {
+    const model = new FakeModel([callTool("list_my_accounts", {}), say("Here they are.")]);
+    const { chat, sessions } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP2);
+    await chat.handle(SP2, sessionId, "What are my accounts?", () => Promise.resolve([]));
+    const results = toolResults(model);
+    expect(results).toContain("acct_cabot_shore");
+    expect(results).not.toContain("acct_harbor");
+    expect(results).not.toContain("acct_willow");
+    expect(results).not.toContain(SP2);
+  });
+});
+
+describe("the model cannot choose the owner", () => {
   /**
-   * At the stakeholders step, a message that is not a confirmation
-   * does not build a proposal: the model answers it (when configured)
-   * and the step holds with no pending approval.
+   * An owner field slipped into a tool call is rejected outright and
+   * the search never runs; a clean call runs with the session's owner.
    */
-  it("holds at the stakeholders step for a non-confirmation message", async () => {
-    const working: ModelClient = {
-      complete: () => Promise.resolve("Earth has one moon."),
+  it("rejects an owner argument and always searches as the caller", async () => {
+    const model = new FakeModel([
+      callTool("search_memories", { query: "CMO", owner_salesperson_id: SP1 }),
+      callTool("search_memories", { query: "CMO" }),
+      say("Done."),
+    ]);
+    const { chat, sessions } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP2);
+    const owners: string[] = [];
+    const spy: SearchFn = (owner) => {
+      owners.push(owner);
+      return Promise.resolve([]);
     };
-    const { chat } = await freshChat(working);
-    const opened = await chat.openSession(SP1);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    const sessionId = opened.session.id;
-    await chat.handle(SP1, sessionId, INTAKE);
-    const reply = await chat.handle(SP1, sessionId, "how many moons does earth have?");
-    expect(reply.ok).toBe(true);
-    if (reply.ok) {
-      expect(reply.reply).toBe("Earth has one moon.");
-      expect(reply.step).toBe("stakeholders");
-      expect(reply.pendingApproval).toBeUndefined();
-    }
+    await chat.handle(SP2, sessionId, "Who is the CMO?", spy);
+    expect(owners).toEqual([SP2]);
+    expect(toolResults(model)).toContain("invalid arguments");
   });
 
+  /** No tool definition sent to the model offers an owner parameter. */
+  it("offers no owner parameter on any tool", async () => {
+    const model = new FakeModel([say("Hi.")]);
+    const { chat, sessions } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP1);
+    await chat.handle(SP1, sessionId, "Hello", () => Promise.resolve([]));
+    expect(JSON.stringify(model.lastTools)).not.toContain("owner");
+    expect(model.lastTools.map((tool) => tool.function.name)).not.toContain("approve");
+  });
+
+  /** parseArgs accepts exactly the named string fields and nothing else. */
+  it("validates tool arguments strictly", () => {
+    expect(parseArgs('{"query":"x"}', ["query"])).toEqual({ query: "x" });
+    expect(parseArgs('{"query":"x","as":"y"}', ["query"])).toBeUndefined();
+    expect(parseArgs('{"query":3}', ["query"])).toBeUndefined();
+    expect(parseArgs('{"query":"  "}', ["query"])).toBeUndefined();
+    expect(parseArgs("not json", ["query"])).toBeUndefined();
+    expect(parseArgs("", [])).toEqual({});
+  });
+});
+
+describe("propose and approve", () => {
   /**
-   * With a failing model, an off-script question at intake gets the
-   * scripted re-prompt, exactly as if no model were configured.
+   * propose on the caller's own account creates exactly one pending
+   * approval and writes nothing to the outbox; a model attempt to call
+   * an "approve" tool is answered "unknown tool" and changes nothing.
+   * Only the human approve path decides it.
    */
-  it("falls back to the scripted re-prompt at intake when the model call fails", async () => {
-    const failing: ModelClient = {
-      complete: () => Promise.reject(new Error("model unavailable")),
-    };
-    const { chat } = await freshChat(failing);
-    const opened = await chat.openSession(SP1);
-    if (!opened.ok) {
-      throw new Error("open failed");
-    }
-    const reply = await chat.handle(
-      SP1,
-      opened.session.id,
-      "how many moons does earth have?",
+  it("creates a pending approval only, and the model cannot approve it", async () => {
+    const model = new FakeModel([
+      callTool("propose", { account_id: "acct_cabot_shore", summary: "Run a spring campaign." }),
+      callTool("approve", { approval_id: "anything" }),
+      say("Drafted; approve it when ready."),
+    ]);
+    const { chat, sessions, memory, outbox, store } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP2);
+    const result = await chat.handle(SP2, sessionId, "Draft a campaign for Cabot.", () =>
+      Promise.resolve([]),
     );
-    expect(reply.ok).toBe(true);
-    if (reply.ok) {
-      expect(reply.reply).toContain("stakeholder");
-      expect(reply.step).toBe("intake");
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
     }
+    expect(result.pendingApproval?.status).toBe("pending");
+    expect(result.pendingApproval?.accountId).toBe("acct_cabot_shore");
+    expect(await store.list("approvals")).toHaveLength(1);
+    expect(await outbox.list(SP2)).toEqual([]);
+    expect(toolResults(model)).toContain("unknown tool");
+    const approvalId = result.pendingApproval?.id ?? "";
+    expect((await memory.approve(SP2, approvalId)).ok).toBe(true);
+    expect(await outbox.list(SP2)).toHaveLength(1);
   });
 
+  /** remember on the caller's own account stores an item stamped with the account. */
+  it("remembers a fact on the caller's own account", async () => {
+    const model = new FakeModel([
+      callTool("remember", { account_id: "acct_cabot_shore", text: "Sam owns the shop.", kind: "stakeholder" }),
+      say("Saved."),
+    ]);
+    const { chat, sessions, store } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP2);
+    await chat.handle(SP2, sessionId, "Sam owns Cabot Shore.", () => Promise.resolve([]));
+    const saved = (await store.list("memories")).find((item) => item.text === "Sam owns the shop.");
+    expect(saved).toMatchObject({ owner_salesperson_id: SP2, account_id: "acct_cabot_shore" });
+  });
+});
+
+describe("history and failure", () => {
   /**
-   * Read the pending approval id for a session by sending the message
-   * that holds at the proposal step, which carries it along.
+   * The conversation, tool calls and results included, is saved on the
+   * session and replayed on the next turn, and survives close/resume.
    */
-  async function currentApprovalId(
-    chat: ChatService,
-    sessionId: string,
-  ): Promise<string> {
-    const held = await chat.handle(SP1, sessionId, "still waiting");
-    if (!held.ok || held.pendingApproval === undefined) {
-      throw new Error("no pending approval");
-    }
-    return held.pendingApproval.id;
-  }
+  it("saves history on the session and replays it", async () => {
+    const model = new FakeModel([
+      callTool("list_my_accounts", {}),
+      say("You have Cabot Shore."),
+      say("Still Cabot Shore."),
+    ]);
+    const { chat, sessions } = await freshAgent(model);
+    const sessionId = await mustOpen(sessions, SP2);
+    await chat.handle(SP2, sessionId, "My accounts?", () => Promise.resolve([]));
+    await sessions.close(sessionId, SP2);
+    await sessions.resume(sessionId, SP2);
+    const second = await chat.handle(SP2, sessionId, "And now?", () => Promise.resolve([]));
+    expect(second).toMatchObject({ ok: true, reply: "Still Cabot Shore." });
+    const replayed = model.calls.at(-1) ?? [];
+    expect(replayed.map((message) => message.role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+      "user",
+    ]);
+    const stored = await sessions.get(sessionId, SP2);
+    expect(stored.ok && stored.session.history).toHaveLength(6);
+  });
+
+  /** A failing model returns the plain error, never a canned reply, and saves nothing. */
+  it("returns model unavailable when the model call fails", async () => {
+    const { chat, sessions } = await freshAgent(new FakeModel([]));
+    const sessionId = await mustOpen(sessions, SP1);
+    await expect(
+      chat.handle(SP1, sessionId, "Hello", () => Promise.resolve([])),
+    ).resolves.toEqual({ ok: false, error: "model unavailable" });
+    const stored = await sessions.get(sessionId, SP1);
+    expect(stored.ok && stored.session.history).toEqual([]);
+  });
+
+  /** With no model configured the agent fails closed with the same error. */
+  it("returns model unavailable when no model is configured", async () => {
+    const { chat, sessions } = await freshAgent();
+    const sessionId = await mustOpen(sessions, SP1);
+    await expect(
+      chat.handle(SP1, sessionId, "Hello", () => Promise.resolve([])),
+    ).resolves.toEqual({ ok: false, error: "model unavailable" });
+  });
+
+  /** A model that never stops calling tools is cut off and fails closed. */
+  it("fails closed when the model never gives a final answer", async () => {
+    const turns = Array.from({ length: 10 }, (_, i) => callTool("list_my_accounts", {}, `c${i}`));
+    const { chat, sessions } = await freshAgent(new FakeModel(turns));
+    const sessionId = await mustOpen(sessions, SP1);
+    await expect(
+      chat.handle(SP1, sessionId, "Loop", () => Promise.resolve([])),
+    ).resolves.toEqual({ ok: false, error: "model unavailable" });
+  });
+
+  /** Another owner's session gets the generic refusal; a closed one is "not open". */
+  it("refuses another owner's session and a closed session", async () => {
+    const { chat, sessions } = await freshAgent(new FakeModel([say("x")]));
+    const sessionId = await mustOpen(sessions, SP1);
+    await expect(
+      chat.handle(SP2, sessionId, "Hello", () => Promise.resolve([])),
+    ).resolves.toEqual({ ok: false, error: "not found" });
+    await sessions.close(sessionId, SP1);
+    await expect(
+      chat.handle(SP1, sessionId, "Hello", () => Promise.resolve([])),
+    ).resolves.toEqual({ ok: false, error: "not open" });
+  });
 });
 
 /**
- * POST to the Worker with an optional JSON body and return the status
- * and parsed body, so route tests read like the page's own calls.
- * Every call runs under the in-memory test environment.
+ * Send a request to the Worker under the in-memory test environment
+ * and return the status and parsed JSON body.
  */
-async function postJson(
+async function call(
+  method: string,
   path: string,
   payload?: unknown,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const response = await worker.fetch(
     new Request(`https://x.test${path}`, {
-      method: "POST",
+      method,
       headers: { "content-type": "application/json" },
       body: payload === undefined ? undefined : JSON.stringify(payload),
     }),
     TEST_ENV,
   );
-  return {
-    status: response.status,
-    body: (await response.json()) as Record<string, unknown>,
-  };
+  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
 }
 
-/** GET from the Worker under the test environment, parsed as JSON. */
-async function getJson(
-  path: string,
-): Promise<{ status: number; body: Record<string, unknown> }> {
-  const response = await worker.fetch(
-    new Request(`https://x.test${path}`),
-    TEST_ENV,
-  );
-  return {
-    status: response.status,
-    body: (await response.json()) as Record<string, unknown>,
-  };
-}
-
-describe("demo routes", () => {
+describe("agent routes", () => {
   /**
-   * GET / serves the demo page as HTML, labelled as sample data, with
-   * the chat pane, the approval card, and both panels present.
+   * The page opens on a blank chat: no starter message, no step label,
+   * no canned account copy, and no innerHTML use.
    */
-  it("serves the demo page", async () => {
-    const response = await worker.fetch(
-      new Request("https://x.test/"),
-      TEST_ENV,
-    );
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/html");
+  it("serves a page with no scripted content", async () => {
+    const response = await worker.fetch(new Request("https://x.test/"), TEST_ENV);
     const html = await response.text();
-    expect(html.toLowerCase()).toContain("sample");
-    expect(html).toContain('id="thread"');
-    expect(html).toContain('id="approveBtn"');
-    expect(html).toContain('id="changeLogList"');
-    expect(html).toContain('id="outboxList"');
+    expect(response.status).toBe(200);
+    expect(html).not.toContain("Let's start");
+    expect(html).not.toContain("step");
+    expect(html).not.toContain("Willow");
+    expect(html).not.toContain("innerHTML");
+    expect(html).toContain("Pending approval");
     expect(html).toContain("Change log");
   });
 
-  /** GET /seed is gone — it served both owners' accounts to anyone. */
-  it("refuses the removed seed route with a 404", async () => {
-    const { status } = await getJson("/seed");
-    expect(status).toBe(404);
-  });
-
   /**
-   * The page's own flow, over HTTP: open a session, run intake and
-   * the proposal through /chat, then the approval card's rules — the
-   * other salesperson's approve attempt gets the identical generic
-   * refusal an unknown approval gets (and is logged), the owner's
-   * approve succeeds, a repeat is a 409, and the outbox still holds
-   * exactly one entry for the approval. The panels are owner-filtered:
-   * the owner's change log shows the approve entry, the other's shows
-   * only their own refused attempt. Finally the session closes and
-   * resumes at the proposal step.
+   * POST /session opens an owner-only session; POST /chat without a
+   * model configured answers 503 "model unavailable", not a reply.
    */
-  it("runs the page flow end to end over HTTP", async () => {
-    const opened = await postJson(`/session?as=${SP1}`, {});
+  it("opens a session and fails closed on chat without a model", async () => {
+    const opened = await call("POST", `/session?as=${SP1}`, {});
     expect(opened.status).toBe(201);
-    const session = opened.body.session as { id: string };
-    const sessionId = session.id;
-
-    const intake = await postJson(`/chat?as=${SP1}`, {
-      sessionId,
-      text: INTAKE,
-    });
-    expect(intake.body.step).toBe("stakeholders");
-
-    const proposed = await postJson(`/chat?as=${SP1}`, {
-      sessionId,
-      text: "looks good",
-    });
-    expect(proposed.body.step).toBe("proposal");
-    const pending = proposed.body.pendingApproval as { id: string };
-    expect(pending.id).toBeDefined();
-
-    const crossOwner = await postJson(`/approve/${pending.id}?as=${SP2}`);
-    expect(crossOwner.status).toBe(404);
-    expect(crossOwner.body).toEqual({ ok: false, error: "not found" });
-    const unknown = await postJson(`/approve/no-such-approval?as=${SP1}`);
-    expect(unknown.status).toBe(404);
-    expect(unknown.body).toEqual(crossOwner.body);
-
-    const approved = await postJson(`/approve/${pending.id}?as=${SP1}`);
-    expect(approved.status).toBe(200);
-
-    const repeated = await postJson(`/approve/${pending.id}?as=${SP1}`);
-    expect(repeated.status).toBe(409);
-
-    const ownOutbox = await getJson(`/outbox?as=${SP1}`);
-    const ownEntries = ownOutbox.body.entries as { approvalId: string }[];
-    expect(
-      ownEntries.filter((item) => item.approvalId === pending.id),
-    ).toHaveLength(1);
-    const otherOutbox = await getJson(`/outbox?as=${SP2}`);
-    const otherEntries = otherOutbox.body.entries as { approvalId: string }[];
-    expect(
-      otherEntries.filter((item) => item.approvalId === pending.id),
-    ).toHaveLength(0);
-
-    const ownLog = await getJson(`/change-log?as=${SP1}`);
-    const ownLogEntries = ownLog.body.entries as {
-      action: string;
-      subject: string;
-    }[];
-    expect(
-      ownLogEntries.some(
-        (item) => item.action === "approve" && item.subject === pending.id,
-      ),
-    ).toBe(true);
-    const otherLog = await getJson(`/change-log?as=${SP2}`);
-    const otherLogEntries = otherLog.body.entries as {
-      action: string;
-      subject: string;
-      actor: string;
-    }[];
-    expect(
-      otherLogEntries.some(
-        (item) => item.action === "approve" && item.subject === pending.id,
-      ),
-    ).toBe(false);
-    expect(
-      otherLogEntries.some(
-        (item) =>
-          item.action === "refuse" &&
-          item.subject === pending.id &&
-          item.actor === SP2,
-      ),
-    ).toBe(true);
-
-    const closed = await postJson(`/session/${sessionId}/close?as=${SP1}`, {});
-    expect(closed.status).toBe(200);
-    const closedSession = closed.body.session as { status: string };
-    expect(closedSession.status).toBe("closed");
-
-    const resumed = await postJson(
-      `/session/${sessionId}/resume?as=${SP1}`,
-      {},
-    );
-    expect(resumed.status).toBe(200);
-    const resumedSession = resumed.body.session as {
-      status: string;
-      step: string;
-    };
-    expect(resumedSession.status).toBe("open");
-    expect(resumedSession.step).toBe("proposal");
+    const session = opened.body.session as Record<string, unknown>;
+    expect(session.history).toEqual([]);
+    expect(session).not.toHaveProperty("accountId");
+    const chatted = await call("POST", `/chat?as=${SP1}`, { sessionId: session.id, text: "Hello" });
+    expect(chatted.status).toBe(503);
+    expect(chatted.body).toEqual({ ok: false, error: "model unavailable" });
   });
 
-  /**
-   * Identity is required and comes only from `?as=`: the approve,
-   * outbox, and change-log routes without it fail closed with a 400,
-   * and an identity smuggled in an approve body is ignored — the call
-   * still fails for want of `?as=`.
-   */
-  it("requires identity from the query parameter, never the body", async () => {
-    const approveNoAs = await postJson("/approve/some-id", { as: SP1 });
-    expect(approveNoAs.status).toBe(400);
-    const outboxNoAs = await getJson("/outbox");
-    expect(outboxNoAs.status).toBe(400);
-    const logNoAs = await getJson("/change-log");
-    expect(logNoAs.status).toBe(400);
+  /** Identity comes from the query parameter only, never the body. */
+  it("requires identity from the query parameter", async () => {
+    const noAs = await call("POST", "/session", { as: SP1 });
+    expect(noAs.status).toBe(400);
+    const unknown = await call("POST", "/session?as=acct_nobody", {});
+    expect(unknown.status).toBe(404);
   });
 });

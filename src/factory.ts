@@ -31,9 +31,9 @@ export interface WorkerEnv {
   /** Database name; defaults to `DEFAULT_DB_NAME` when unset. */
   MONGODB_DB?: string;
   /**
-   * API key for the model the chat may use for free-form replies,
-   * from the secret store. Unset means scripted replies only; the
-   * governed intents never depend on it (see `model.ts`).
+   * API key for the model the chat agent runs on, from the secret
+   * store. Unset means the chat fails closed with "model unavailable"
+   * (see `model.ts`).
    */
   MODEL_API_KEY?: string;
   /**

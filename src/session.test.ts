@@ -1,10 +1,10 @@
 /**
- * Tests for the session service: a session can be opened on an account
- * the opener owns, advanced, closed, and resumed at exactly the step
- * and data where it was closed — and only its owner can do any of
- * that. Anyone else, and anyone naming an account or session that is
- * not theirs (or does not exist), gets the one generic refusal, the
- * attempt is recorded as a refusal, and nothing changes.
+ * Tests for the session service: a session is opened for a known
+ * salesperson, tied to no account, has its conversation history saved,
+ * and is closed and resumed with that history intact — and only its
+ * owner can do any of that. Anyone else, and anyone naming a session
+ * that is not theirs (or does not exist), gets the one generic
+ * refusal, the attempt is recorded as a refusal, and nothing changes.
  */
 
 import { describe, expect, it } from "vitest";
@@ -15,10 +15,9 @@ import { SessionService, type Session } from "./session";
 import type { Store } from "./store";
 
 /**
- * Build a fresh session service and log over a seeded store, so the
- * seed accounts exist with their owners (acct_salesperson owns acct_willow
- * and acct_harbor, acct_salesperson_2 owns acct_cabot_shore) and a test can assert on behaviour,
- * stored state, and the recorded evidence together.
+ * Build a fresh session service and log over a seeded store, so both
+ * salesperson rows exist and a test can assert on behaviour, stored
+ * state, and the recorded evidence together.
  */
 async function freshSessions(): Promise<{
   service: SessionService;
@@ -37,66 +36,47 @@ async function freshSessions(): Promise<{
 async function mustOpen(
   service: SessionService,
   ownerSalespersonId: string,
-  accountId: string,
 ): Promise<Session> {
-  const result = await service.open(ownerSalespersonId, accountId);
+  const result = await service.open(ownerSalespersonId);
   if (!result.ok) {
     throw new Error(`expected open to succeed, got "${result.error}"`);
   }
   return result.session;
 }
 
-describe("SessionService open (account ownership)", () => {
+describe("SessionService open", () => {
   /**
-   * Opening a session on an account owned by the other salesperson is
-   * refused with the generic answer, a "refuse" entry naming the
-   * requester is recorded against the account, and no session is
-   * stored.
+   * An id that is not a salesperson row — a client account or an
+   * unknown id — gets the generic refusal and no session is stored.
    */
-  it("refuses an open on the other salesperson's account and logs it", async () => {
-    const { service, log, store } = await freshSessions();
-    const result = await service.open("acct_salesperson_2", "acct_willow");
-    expect(result).toEqual({ ok: false, error: "not found" });
-    await expect(store.list("sessions")).resolves.toEqual([]);
-    const refusals = (await log.entries()).filter(
-      (entry) => entry.action === "refuse",
-    );
-    expect(refusals).toHaveLength(1);
-    expect(refusals[0].actor).toBe("acct_salesperson_2");
-    expect(refusals[0].subject).toBe("acct_willow");
-  });
-
-  /**
-   * Opening a session on an account that does not exist returns the
-   * same generic refusal as someone else's account — the two are
-   * indistinguishable — and stores nothing.
-   */
-  it("refuses an open on a missing account with the same generic answer", async () => {
+  it("refuses an open for anyone who is not a known salesperson", async () => {
     const { service, store } = await freshSessions();
-    const missing = await service.open("acct_salesperson", "acct-never-existed");
-    const crossOwner = await service.open("acct_salesperson_2", "acct_willow");
-    expect(missing).toEqual({ ok: false, error: "not found" });
-    expect(missing).toEqual(crossOwner);
-    await expect(store.list("sessions")).resolves.toEqual([]);
+    const unknown = await service.open("acct-never-existed");
+    const client = await service.open("acct_willow");
+    expect(unknown).toEqual({ ok: false, error: "not found" });
+    expect(client).toEqual(unknown);
+    expect(await store.list("sessions")).toEqual([]);
   });
 });
 
 describe("SessionService close and resume", () => {
   /**
-   * Open, advance to "approval" with data, close, then resume: the
-   * resumed session is open again at step "approval" with its data
-   * intact, and the log shows the whole story including a
-   * "session-resume" entry.
+   * Open, save history and data, close, then resume: the resumed
+   * session is open again with its history and data intact, and the
+   * log shows open, close, and resume (saving history logs nothing).
    */
-  it("resumes a closed session at its exact step with its data", async () => {
+  it("resumes a closed session with its history and data", async () => {
     const { service, log } = await freshSessions();
-    const opened = await mustOpen(service, "acct_salesperson", "acct_willow");
-    expect(opened.step).toBe("intake");
+    const opened = await mustOpen(service, "acct_salesperson");
     expect(opened.status).toBe("open");
-    const advanced = await service.advance(opened.id, "acct_salesperson", "approval", {
+    const history = [
+      { role: "user" as const, content: "hi" },
+      { role: "assistant" as const, content: "hello" },
+    ];
+    const saved = await service.saveHistory(opened.id, "acct_salesperson", history, {
       leadContact: "Priya",
     });
-    expect(advanced.ok).toBe(true);
+    expect(saved.ok).toBe(true);
     const closed = await service.close(opened.id, "acct_salesperson");
     expect(closed.ok).toBe(true);
     const resumed = await service.resume(opened.id, "acct_salesperson");
@@ -104,7 +84,7 @@ describe("SessionService close and resume", () => {
       ok: true,
       session: {
         id: opened.id,
-        step: "approval",
+        history,
         status: "open",
         data: { leadContact: "Priya" },
       },
@@ -112,7 +92,6 @@ describe("SessionService close and resume", () => {
     const actions = (await log.entries()).map((entry) => entry.action);
     expect(actions).toEqual([
       "session-open",
-      "session-step",
       "session-close",
       "session-resume",
     ]);
@@ -122,19 +101,20 @@ describe("SessionService close and resume", () => {
   /**
    * A resume attempt by the other salesperson is refused with the
    * generic answer — the result reveals nothing about the session — a
-   * "refuse" entry is recorded, and the stored session stays closed at
-   * its saved step.
+   * "refuse" entry is recorded, and the stored session stays closed
+   * with its history.
    */
   it("refuses a resume by the other salesperson and stays closed", async () => {
     const { service, log, store } = await freshSessions();
-    const opened = await mustOpen(service, "acct_salesperson", "acct_willow");
-    await service.advance(opened.id, "acct_salesperson", "stakeholders");
+    const opened = await mustOpen(service, "acct_salesperson");
+    const history = [{ role: "user" as const, content: "secret plan" }];
+    await service.saveHistory(opened.id, "acct_salesperson", history);
     await service.close(opened.id, "acct_salesperson");
     const result = await service.resume(opened.id, "acct_salesperson_2");
     expect(result).toEqual({ ok: false, error: "not found" });
-    expect(JSON.stringify(result)).not.toContain("stakeholders");
+    expect(JSON.stringify(result)).not.toContain("secret plan");
     const stored = await store.get("sessions", opened.id);
-    expect(stored).toMatchObject({ status: "closed", step: "stakeholders" });
+    expect(stored).toMatchObject({ status: "closed", history });
     const refusals = (await log.entries()).filter(
       (entry) => entry.action === "refuse",
     );
@@ -148,7 +128,7 @@ describe("SessionService close and resume", () => {
    */
   it("fails closed when resuming a session that is still open", async () => {
     const { service } = await freshSessions();
-    const opened = await mustOpen(service, "acct_salesperson", "acct_willow");
+    const opened = await mustOpen(service, "acct_salesperson");
     await expect(service.resume(opened.id, "acct_salesperson")).resolves.toEqual({
       ok: false,
       error: "not closed",
@@ -161,13 +141,13 @@ describe("SessionService close and resume", () => {
    */
   it("stores the session keyed by _id with owner_salesperson_id", async () => {
     const { service, store } = await freshSessions();
-    const opened = await mustOpen(service, "acct_salesperson", "acct_willow");
+    const opened = await mustOpen(service, "acct_salesperson");
     const stored = await store.get("sessions", opened.id);
     expect(stored).toMatchObject({
       _id: opened.id,
       owner_salesperson_id: "acct_salesperson",
-      accountId: "acct_willow",
     });
     expect(stored).not.toHaveProperty("ownerId");
+    expect(stored).not.toHaveProperty("accountId");
   });
 });

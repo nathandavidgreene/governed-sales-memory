@@ -9,14 +9,14 @@
  * - `GET /memory/:id?as=<requesterId>` recalls one item for its owner;
  *   anyone else — and anyone asking for an item that does not exist —
  *   gets one identical generic refusal with HTTP 404.
- * - `POST /session?as=<salespersonId>` opens a working session on the
- *   salesperson's account.
+ * - `POST /session?as=<salespersonId>` opens an empty working session
+ *   for the salesperson, tied to no account.
  * - `GET /session/:id?as=<requesterId>` reads one session back, owner
  *   only; `POST /session/:id/close?as=` and `.../resume?as=` close and
  *   resume it, owner only.
- * - `POST /chat?as=<salespersonId>` runs one chat message in a session
- *   (see `chat.ts`) and returns the reply, the step, and any pending
- *   approval.
+ * - `POST /chat?as=<salespersonId>` runs one chat message through the
+ *   agent and its governed tools (see `chat.ts`) and returns the reply
+ *   and any pending approval, or `model unavailable` with HTTP 503.
  * - `POST /approve/:id?as=<approverId>` approves a pending proposal —
  *   for its owner only; anyone else gets the same generic refusal as
  *   an unknown id, and the attempt is logged.
@@ -39,17 +39,17 @@
  * "true" (local development), in which case a shared in-memory bundle
  * answers so a POST and a later GET see the same items. The local
  * bundle's store starts from the sample seed, mirroring the seeded
- * database, so the demo path runs the same way locally.
+ * database.
  */
 
 import { ChangeLog } from "./change-log";
-import { ChatService } from "./chat";
+import { ChatService, storeSearch } from "./chat";
 import { createStore, type WorkerEnv } from "./factory";
 import { MemoryService } from "./memory";
 import { createModelClient } from "./model";
 import { Outbox } from "./outbox";
 import { demoPage } from "./page";
-import { searchRoute } from "./search-route";
+import { searchRoute, withDatabaseSearch } from "./search-route";
 import { seededStore } from "./seed";
 import { SessionService } from "./session";
 import { MemoryStore, type Store } from "./store";
@@ -61,14 +61,16 @@ interface Services {
   outbox: Outbox;
   log: ChangeLog;
   chat: ChatService;
+  /** The store every service above shares. */
+  store: Store;
 }
 
 /**
  * Build the service bundle over one store.
  * Every service shares the store and the change log, so an action
  * taken through any of them lands in the same change log. The model
- * client is built from the environment: present only when its secret
- * is set, and consulted by the chat only for free-form replies.
+ * client is built from the environment and is present only when its
+ * secret is set; without it the chat fails closed.
  */
 function buildServices(store: Store, env: WorkerEnv | undefined): Services {
   const log = new ChangeLog(store);
@@ -76,7 +78,7 @@ function buildServices(store: Store, env: WorkerEnv | undefined): Services {
   const sessions = new SessionService(store, log);
   const outbox = new Outbox(store);
   const chat = new ChatService(memory, sessions, store, createModelClient(env));
-  return { memory, sessions, outbox, log, chat };
+  return { memory, sessions, outbox, log, chat, store };
 }
 
 /** The shared in-memory services, once built. */
@@ -88,7 +90,7 @@ let sharedServices: Services | undefined;
  * items, which a per-request store cannot do. Only used when the
  * environment explicitly allows the in-memory store (local dev); the
  * store starts from the sample seed, mirroring the seeded database,
- * so the accounts the chat works on exist locally too.
+ * so the accounts the agent works on exist locally too.
  */
 async function sharedBundle(env: WorkerEnv | undefined): Promise<Services> {
   if (sharedServices === undefined) {
@@ -158,6 +160,9 @@ function errorStatus(error: string): number {
   }
   if (error === "outbox write failed") {
     return 500;
+  }
+  if (error === "model unavailable") {
+    return 503;
   }
   if (
     error === "not open" ||
@@ -329,10 +334,10 @@ async function recallMemoryItem(
 }
 
 /**
- * Handle `POST /session?as=<salespersonId>`: open a working session
- * on the salesperson's account, through the chat service.
- * Fails closed with a 400 when the requester id is missing or the
- * salesperson owns no account in the store.
+ * Handle `POST /session?as=<salespersonId>`: open an empty working
+ * session for the salesperson, tied to no account and no step.
+ * A missing requester id is a 400; an id that is not a known
+ * salesperson gets the generic refusal as a 404.
  */
 async function openSession(
   url: URL,
@@ -343,10 +348,10 @@ async function openSession(
     return jsonResponse({ ok: false, error: "missing requester" }, 400);
   }
   const result = await withServices(env, (services) =>
-    services.chat.openSession(ownerId),
+    services.sessions.open(ownerId),
   );
   if (!result.ok) {
-    return jsonResponse(result, 400);
+    return jsonResponse(result, errorStatus(result.error));
   }
   return jsonResponse({ ok: true, session: result.session }, 201);
 }
@@ -378,7 +383,7 @@ async function getSession(
 
 /**
  * Handle `POST /session/:id/close?as=` and `.../resume?as=`: close or
- * resume one session for its owner, keeping the exact step and data.
+ * resume one session for its owner, keeping its history and data.
  * The session service decides; errors map the same way as a read —
  * the generic 404 for another owner's session, 409 when the session
  * is in the wrong state — and a missing requester id is a 400.
@@ -407,9 +412,12 @@ async function changeSession(
 /**
  * Handle `POST /chat?as=<salespersonId>`: run one chat message in a
  * session. The body is `{ sessionId, text }`; the sender is the `?as=`
- * caller, never a body field. The chat service decides the reply;
- * errors map to the generic 404 (another owner's session, or none)
- * or 409 (session closed). A malformed body is a 400.
+ * caller, never a body field, and every tool the agent runs acts as
+ * that caller. Searches go to the database's memories collection
+ * (vector search with keyword fallback), or to the in-memory store's
+ * keyword search in local development. Errors map to the generic 404
+ * (another owner's session, or none), 409 (session closed), or 503
+ * (model unavailable). A malformed body is a 400.
  */
 async function chatMessage(
   request: Request,
@@ -432,7 +440,9 @@ async function chatMessage(
   const sessionId = body.sessionId;
   const text = body.text;
   const result = await withServices(env, (services) =>
-    services.chat.handle(senderId, sessionId, text),
+    withDatabaseSearch(env, storeSearch(services.store), (search) =>
+      services.chat.handle(senderId, sessionId, text, search),
+    ),
   );
   if (!result.ok) {
     return jsonResponse(result, errorStatus(result.error));

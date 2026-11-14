@@ -1,16 +1,16 @@
 /**
- * The demo page: one plain HTML page, served by the Worker itself.
+ * The app page: one plain HTML page, served by the Worker itself.
  *
  * No framework and no build step — the page is a template string the
  * Worker returns, and its small script talks to the JSON routes with
- * `fetch`. Chat is the main feature: the thread and input take the
- * main pane, and the right rail only shows what the chat produced —
- * the pending approval card, the change log, and the
- * outbox. The salesperson switcher re-opens the page as the other
- * salesperson, each with their own session and thread, which is how
- * the isolation beat is run: ask, as one salesperson, about the
- * other's account and watch the refusal land in the change log.
- * Everything on the page is sample data, and prices are sample prices.
+ * `fetch`. The chat opens blank on a new session tied only to the
+ * salesperson; nothing is sent until they type. Agent replies get a
+ * small, safe markdown rendering (bold and line breaks) built from DOM
+ * text nodes, so no reply is ever parsed as HTML. The right rail shows
+ * the pending approval card (approving is a human click on the
+ * `/approve` route, never the agent), the change log, and the outbox.
+ * The salesperson switcher acts as the other salesperson, each with
+ * their own session and thread.
  */
 
 export const demoPage = `<!doctype html>
@@ -18,7 +18,7 @@ export const demoPage = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Governed Sales Memory — demo</title>
+<title>Governed Sales Memory</title>
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f4f5f7; color: #1c2330; }
@@ -35,7 +35,7 @@ export const demoPage = `<!doctype html>
   .card h2 { margin: 0 0 10px; font-size: 15px; }
   .card .empty { color: #5a6577; font-size: 13px; margin: 0; }
   #thread { display: flex; flex-direction: column; gap: 10px; min-height: 260px; max-height: 480px; overflow-y: auto; padding: 4px; }
-  .msg { max-width: 85%; padding: 9px 12px; border-radius: 12px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; }
+  .msg { max-width: 85%; padding: 9px 12px; border-radius: 12px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg.user { align-self: flex-end; background: #2456c8; color: #fff; border-bottom-right-radius: 4px; }
   .msg.agent { align-self: flex-start; background: #eef1f6; border-bottom-left-radius: 4px; }
   .msg.system { align-self: center; background: none; color: #5a6577; font-size: 12.5px; text-align: center; }
@@ -58,8 +58,8 @@ export const demoPage = `<!doctype html>
 </head>
 <body>
 <header>
-  <h1>Governed Sales Memory — demo</h1>
-  <p>Sample data only: every account, person and price on this page is a sample, and every price is a sample price.</p>
+  <h1>Governed Sales Memory</h1>
+  <p>Sample data.</p>
 </header>
 <div class="switcher">
   <span>Acting as:</span>
@@ -78,7 +78,7 @@ export const demoPage = `<!doctype html>
       <span id="sessionStatus">Opening session…</span>
       <button class="quiet" id="closeBtn" type="button">Close session</button>
       <button class="quiet" id="resumeBtn" type="button" disabled>Resume session</button>
-      <button class="quiet" id="clearBtn" type="button" disabled>Clear chat</button>
+      <button class="quiet" id="clearBtn" type="button" disabled>New session</button>
     </div>
   </section>
   <aside>
@@ -105,7 +105,7 @@ var state = { owner: "acct_salesperson", per: {} };
 
 function current() {
   if (!state.per[state.owner]) {
-    state.per[state.owner] = { sessionId: null, step: "", closed: false, pending: null, messages: [] };
+    state.per[state.owner] = { sessionId: null, closed: false, pending: null, messages: [] };
   }
   return state.per[state.owner];
 }
@@ -133,13 +133,34 @@ function pushMessage(who, text) {
   renderThread();
 }
 
+// Append text to a node with **bold** spans turned into <strong>
+// elements. Only text nodes and createElement are used, so nothing in
+// the text is ever parsed as HTML; line breaks render via pre-wrap.
+function appendMarkdown(node, text) {
+  var parts = String(text).split("**");
+  parts.forEach(function (part, index) {
+    if (part === "") { return; }
+    if (index % 2 === 1 && index < parts.length - 1) {
+      var strong = document.createElement("strong");
+      strong.textContent = part;
+      node.appendChild(strong);
+    } else {
+      node.appendChild(document.createTextNode(index % 2 === 1 ? "**" + part : part));
+    }
+  });
+}
+
 function renderThread() {
   var thread = el("thread");
   thread.textContent = "";
   current().messages.forEach(function (message) {
     var div = document.createElement("div");
     div.className = "msg " + message.who;
-    div.textContent = message.text;
+    if (message.who === "agent") {
+      appendMarkdown(div, message.text);
+    } else {
+      div.textContent = message.text;
+    }
     thread.appendChild(div);
   });
   thread.scrollTop = thread.scrollHeight;
@@ -150,7 +171,7 @@ function renderSession() {
   el("spBtn1").className = state.owner === "acct_salesperson" ? "active" : "";
   el("spBtn2").className = state.owner === "acct_salesperson_2" ? "active" : "";
   el("sessionStatus").textContent = mine.sessionId
-    ? "Session " + (mine.closed ? "closed" : "open") + " · step: " + (mine.step || "intake") + " · " + state.owner
+    ? "Session " + (mine.closed ? "closed" : "open") + " · " + state.owner
     : "Opening session…";
   el("chatText").disabled = !mine.sessionId || mine.closed;
   el("sendBtn").disabled = !mine.sessionId || mine.closed;
@@ -170,13 +191,20 @@ function renderApproval() {
   }
 }
 
+function emptyItem(list, text) {
+  var li = document.createElement("li");
+  li.className = "hash";
+  li.textContent = text;
+  list.appendChild(li);
+}
+
 function renderPanels() {
   api("/change-log?as=" + encodeURIComponent(state.owner)).then(function (result) {
     var list = el("changeLogList");
     list.textContent = "";
     var entries = result.body.entries || [];
     if (entries.length === 0) {
-      list.innerHTML = "<li class='hash'>Nothing recorded yet.</li>";
+      emptyItem(list, "Nothing recorded yet.");
       return;
     }
     entries.forEach(function (entry) {
@@ -200,7 +228,7 @@ function renderPanels() {
     list.textContent = "";
     var entries = result.body.entries || [];
     if (entries.length === 0) {
-      list.innerHTML = "<li class='hash'>Nothing sent onward yet.</li>";
+      emptyItem(list, "Nothing sent onward yet.");
       return;
     }
     entries.forEach(function (entry) {
@@ -223,12 +251,14 @@ function sendChat(text) {
   pushMessage("user", text);
   return postJson("/chat?as=" + encodeURIComponent(state.owner), { sessionId: mine.sessionId, text: text }).then(function (result) {
     if (result.body.ok) {
-      mine.step = result.body.step;
       mine.pending = result.body.pendingApproval || null;
       pushMessage("agent", result.body.reply);
     } else {
-      pushMessage("system", "The agent refused that message (" + result.body.error + ").");
+      pushMessage("system", "Error: " + result.body.error);
     }
+    refresh();
+  }, function () {
+    pushMessage("system", "Error: request failed");
     refresh();
   });
 }
@@ -243,12 +273,10 @@ function openSession(owner) {
   postJson("/session?as=" + encodeURIComponent(owner), {}).then(function (result) {
     if (result.body.ok) {
       mine.sessionId = result.body.session.id;
-      mine.step = result.body.session.step;
-      refresh();
     } else {
-      pushMessage("system", "Could not open a session for " + owner + ".");
-      refresh();
+      pushMessage("system", "Error: " + result.body.error);
     }
+    refresh();
   });
 }
 
@@ -274,13 +302,11 @@ el("approveBtn").addEventListener("click", function () {
   api("/approve/" + encodeURIComponent(approvalId) + "?as=" + encodeURIComponent(state.owner), { method: "POST" }).then(function (result) {
     if (result.body.ok) {
       mine.pending = null;
-      pushMessage("system", "Approved — the change was written to the outbox and recorded in the change log.");
-      refresh();
-      sendChat("Approved.");
+      pushMessage("system", "Approved.");
     } else {
-      pushMessage("system", "Approval failed (" + result.body.error + ").");
-      refresh();
+      pushMessage("system", "Error: " + result.body.error);
     }
+    refresh();
   });
 });
 
@@ -289,10 +315,9 @@ el("closeBtn").addEventListener("click", function () {
   api("/session/" + encodeURIComponent(mine.sessionId) + "/close?as=" + encodeURIComponent(state.owner), { method: "POST" }).then(function (result) {
     if (result.body.ok) {
       mine.closed = true;
-      mine.step = result.body.session.step;
-      pushMessage("system", "Session closed at step '" + mine.step + "'. Its step and data are saved — resume picks up exactly here.");
+      pushMessage("system", "Session closed.");
     } else {
-      pushMessage("system", "Could not close the session (" + result.body.error + ").");
+      pushMessage("system", "Error: " + result.body.error);
     }
     refresh();
   });
@@ -303,10 +328,9 @@ el("resumeBtn").addEventListener("click", function () {
   api("/session/" + encodeURIComponent(mine.sessionId) + "/resume?as=" + encodeURIComponent(state.owner), { method: "POST" }).then(function (result) {
     if (result.body.ok) {
       mine.closed = false;
-      mine.step = result.body.session.step;
-      pushMessage("agent", "Welcome back — resumed at step '" + mine.step + "' with the saved data intact, exactly where you left off.");
+      pushMessage("system", "Session resumed.");
     } else {
-      pushMessage("system", "Could not resume the session (" + result.body.error + ").");
+      pushMessage("system", "Error: " + result.body.error);
     }
     refresh();
   });
@@ -316,7 +340,7 @@ el("clearBtn").addEventListener("click", function () {
   var owner = state.owner;
   var mine = current();
   var startFresh = function () {
-    state.per[owner] = { sessionId: null, step: "", closed: false, pending: null, messages: [] };
+    state.per[owner] = { sessionId: null, closed: false, pending: null, messages: [] };
     openSession(owner);
   };
   if (mine.sessionId && !mine.closed) {
