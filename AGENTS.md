@@ -8,7 +8,7 @@ Also follow [ENGINEERING-PRINCIPLES.md](ENGINEERING-PRINCIPLES.md).
 - **Nathan** owns the project and approves every merge.
 - **Flint** is the repo manager. Flint reviews every pull request, does the merge after Nathan approves, and is your contact when you're blocked.
 - **Chet** is Nathan's coding assistant (Muse Code). Chet's work counts as Nathan's, and Chet is not a team member. Chet follows every rule here, including review before merge.
-- **Greg** is Mike's coding assistant and works alongside Mike. Greg takes on work only as specific, bounded tasks that Nathan delegates manually (relayed through Chet or Flint); he does not pick up roadmap items on his own.
+- **Mike** is Nathan's venture partner and teammate. **Greg** is Mike's coding assistant and works alongside Mike. Mike and Greg take on work only as specific, bounded tasks that Nathan delegates manually (relayed through Chet or Flint); they do not pick up roadmap items on their own.
 
 ## Event rules
 These come from the event and break the submission if ignored:
