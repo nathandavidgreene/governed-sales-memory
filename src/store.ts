@@ -31,6 +31,15 @@ export interface Store {
   put(collection: string, id: string, record: JsonRecord): Promise<void>;
 
   /**
+   * Insert `record` under `id` in `collection` only when that id is
+   * still unused; rejects when a record already exists there. This is
+   * the insert-only write the change log's append is built on: the
+   * database-backed store implements it with `insertOne` and a unique
+   * index on the key, so a racing writer fails instead of overwriting.
+   */
+  insert(collection: string, id: string, record: JsonRecord): Promise<void>;
+
+  /**
    * Return every record in `collection`, in insertion order.
    * Returns an empty list when the collection does not exist.
    */
@@ -64,6 +73,26 @@ export class MemoryStore implements Store {
     if (bucket === undefined) {
       bucket = new Map<string, JsonRecord>();
       this.collections.set(collection, bucket);
+    }
+    bucket.set(id, { ...record });
+  }
+
+  /**
+   * See `Store.insert`. Rejects when the id is already taken, leaving
+   * the stored record untouched.
+   */
+  async insert(
+    collection: string,
+    id: string,
+    record: JsonRecord,
+  ): Promise<void> {
+    let bucket = this.collections.get(collection);
+    if (bucket === undefined) {
+      bucket = new Map<string, JsonRecord>();
+      this.collections.set(collection, bucket);
+    }
+    if (bucket.has(id)) {
+      throw new Error(`duplicate key "${id}" in collection "${collection}"`);
     }
     bucket.set(id, { ...record });
   }

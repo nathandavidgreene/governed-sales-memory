@@ -5,14 +5,19 @@
  * - `GET /health` reports that the Worker is up.
  * - `GET /seed` returns the sample seed state, read back out of a
  *   per-request in-memory store so the storage seam is exercised.
- * - `POST /memory` stores a memory item for its owner.
+ * - `POST /memory?as=<salespersonId>` stores a memory item for its owner.
  * - `GET /memory/:id?as=<requesterId>` recalls one item for its owner;
- *   anyone else gets the generic refusal with HTTP 403.
- * Any other route or method gets a JSON 404 rather than a guess.
+ *   anyone else — and anyone asking for an item that does not exist —
+ *   gets one identical generic refusal with HTTP 404.
+ *
+ * The caller's identity comes only from the `?as=` query parameter,
+ * never from the request body. Malformed input is answered with a JSON
+ * 400, never a thrown 500. Any other route or method gets a JSON 404
+ * rather than a guess.
  */
 
+import { ChangeLog } from "./change-log";
 import { MemoryService } from "./memory";
-import { RecordLog } from "./record";
 import { seededStore } from "./seed";
 import { MemoryStore } from "./store";
 
@@ -40,7 +45,7 @@ let sharedMemory: MemoryService | undefined;
 function memoryService(): MemoryService {
   if (sharedMemory === undefined) {
     const store = new MemoryStore();
-    sharedMemory = new MemoryService(store, new RecordLog(store));
+    sharedMemory = new MemoryService(store, new ChangeLog(store));
   }
   return sharedMemory;
 }
@@ -72,7 +77,7 @@ const worker = {
       });
     }
     if (request.method === "POST" && url.pathname === "/memory") {
-      return storeMemoryItem(request);
+      return storeMemoryItem(request, url);
     }
     const recallMatch = /^\/memory\/([^/]+)$/.exec(url.pathname);
     if (request.method === "GET" && recallMatch !== null) {
@@ -83,25 +88,30 @@ const worker = {
 };
 
 /**
- * Handle `POST /memory`: store one item for its owner.
- * Fails closed with 400 when the body is not JSON or a required field
- * (`ownerId`, `kind`, `text`) is missing; an omitted `id` is generated.
+ * Handle `POST /memory?as=<salespersonId>`: store one item for its owner.
+ * The owner is the `?as=` caller — an owner field in the body is never
+ * trusted and is ignored. Fails closed with a JSON 400 when `as` is
+ * missing, the body is not JSON, or a required field (`kind`, `text`)
+ * is missing; an omitted `id` is generated.
  */
-async function storeMemoryItem(request: Request): Promise<Response> {
-  let body: { ownerId?: unknown; id?: unknown; kind?: unknown; text?: unknown };
+async function storeMemoryItem(
+  request: Request,
+  url: URL,
+): Promise<Response> {
+  const ownerSalespersonId = url.searchParams.get("as");
+  if (ownerSalespersonId === null || ownerSalespersonId === "") {
+    return jsonResponse({ ok: false, error: "missing requester" }, 400);
+  }
+  let body: { id?: unknown; kind?: unknown; text?: unknown };
   try {
     body = (await request.json()) as typeof body;
   } catch {
     return jsonResponse({ ok: false, error: "invalid body" }, 400);
   }
-  if (
-    typeof body.ownerId !== "string" ||
-    typeof body.kind !== "string" ||
-    typeof body.text !== "string"
-  ) {
+  if (typeof body.kind !== "string" || typeof body.text !== "string") {
     return jsonResponse({ ok: false, error: "missing fields" }, 400);
   }
-  const item = await memoryService().remember(body.ownerId, {
+  const item = await memoryService().remember(ownerSalespersonId, {
     id: typeof body.id === "string" ? body.id : undefined,
     kind: body.kind,
     text: body.text,
@@ -111,9 +121,11 @@ async function storeMemoryItem(request: Request): Promise<Response> {
 
 /**
  * Handle `GET /memory/:id?as=<requesterId>`: recall one item.
- * The service's read rule decides; this handler only maps its answer to
- * HTTP — 200 for the owner, 403 for the generic cross-owner refusal,
- * 404 when there is nothing there, 400 without a requester id.
+ * The service's read rule decides; this handler only maps its answer
+ * to HTTP — 200 for the owner, and one identical 404 refusal for both
+ * a cross-owner read and an item that does not exist, so the two are
+ * indistinguishable. A missing requester id or a malformed id in the
+ * URL is a JSON 400.
  */
 async function recallMemoryItem(
   url: URL,
@@ -123,12 +135,15 @@ async function recallMemoryItem(
   if (requesterId === null || requesterId === "") {
     return jsonResponse({ ok: false, error: "missing requester" }, 400);
   }
-  const result = await memoryService().recall(
-    requesterId,
-    decodeURIComponent(rawId),
-  );
+  let itemId: string;
+  try {
+    itemId = decodeURIComponent(rawId);
+  } catch {
+    return jsonResponse({ ok: false, error: "malformed id" }, 400);
+  }
+  const result = await memoryService().recall(requesterId, itemId);
   if (!result.ok) {
-    return jsonResponse(result, result.error === "not yours" ? 403 : 404);
+    return jsonResponse(result, 404);
   }
   return jsonResponse(result);
 }
