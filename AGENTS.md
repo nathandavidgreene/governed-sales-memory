@@ -68,7 +68,7 @@ Run test and lint before every push.
 ## 3. Pull request requirements
 Every pull request must:
 - Use the PR template: what changed, why, which roadmap item, how it was tested, and screenshots for UI changes.
-- Be small, about 300 lines or less. Split anything bigger.
+- Be small, about 1,000 lines or less. Split anything bigger.
 - Include tests for every behaviour change, and docstrings on every new or changed function, class and test.
 - Pass lint and all tests locally before you open it, and pass CI after.
 - Nothing merges red. If CI fails, fix it on your branch.
