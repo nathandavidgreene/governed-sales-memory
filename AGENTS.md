@@ -8,7 +8,7 @@ Also follow [ENGINEERING-PRINCIPLES.md](ENGINEERING-PRINCIPLES.md).
 - **Nathan** owns the project and approves every merge.
 - **Flint** is the repo manager. Flint reviews every pull request, does the merge after Nathan approves, and is your contact when you're blocked.
 - **Chet** is Nathan's coding assistant (Muse Code). Chet's work counts as Nathan's, and Chet is not a team member. Chet follows every rule here, including review before merge.
-- **Greg** is Mike's coding assistant and works alongside Mike.
+- **Mike** is Nathan's venture partner and teammate. **Greg** is Mike's coding assistant and works alongside Mike. Mike and Greg take on work only as specific, bounded tasks that Nathan delegates manually (relayed through Chet or Flint); they do not pick up roadmap items on their own.
 
 ## Event rules
 These come from the event and break the submission if ignored:
@@ -56,6 +56,7 @@ Run test and lint before every push.
 ## 1. Work only on what you're assigned
 - Work from the [team roadmap](https://hackathon-roadmap.nathandavidgreene.workers.dev). It's sign-in only, for team members. If you can't open it, ask Flint.
 - Take only the items assigned to you there.
+- Tasks for Greg and Mike are the exception to roadmap assignment: Nathan delegates those manually, one specific, bounded task at a time, each with a clear scope and a clear done condition. A delegated task is worked as given; if it looks unclear or bigger than its bounds, stop and ask Nathan (through Chet or Flint) rather than expanding it.
 - If you think something is missing or should change, tell Flint. Don't start unassigned work.
 - Do one roadmap item per branch and one branch per pull request.
 - Name branches `<your-name>/<short-item-name>`, for example `nathan/onboarding-seed`.
