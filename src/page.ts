@@ -5,7 +5,7 @@
  * Worker returns, and its small script talks to the JSON routes with
  * `fetch`. Chat is the main feature: the thread and input take the
  * main pane, and the right rail only shows what the chat produced —
- * the pending approval card, the change log (the record log), and the
+ * the pending approval card, the change log, and the
  * outbox. The salesperson switcher re-opens the page as the other
  * salesperson, each with their own session and thread, which is how
  * the isolation beat is run: ask, as one salesperson, about the
@@ -63,8 +63,8 @@ export const demoPage = `<!doctype html>
 </header>
 <div class="switcher">
   <span>Acting as:</span>
-  <button id="spBtn1" type="button">Salesperson 1 · Riley Park</button>
-  <button id="spBtn2" type="button">Salesperson 2 · Jordan Lee</button>
+  <button id="spBtn1" type="button">Salesperson 1</button>
+  <button id="spBtn2" type="button">Salesperson 2</button>
 </div>
 <main>
   <section class="card">
@@ -89,7 +89,7 @@ export const demoPage = `<!doctype html>
     </section>
     <section class="card">
       <h2>Change log</h2>
-      <ul class="log" id="recordsList"><li class="hash">Nothing recorded yet.</li></ul>
+      <ul class="log" id="changeLogList"><li class="hash">Nothing recorded yet.</li></ul>
     </section>
     <section class="card">
       <h2>Outbox (CRM stand-in)</h2>
@@ -99,8 +99,8 @@ export const demoPage = `<!doctype html>
 </main>
 <script>
 "use strict";
-var OWNERS = ["sp-1", "sp-2"];
-var state = { owner: "sp-1", per: {} };
+var OWNERS = ["acct_salesperson", "acct_salesperson_2"];
+var state = { owner: "acct_salesperson", per: {} };
 
 function current() {
   if (!state.per[state.owner]) {
@@ -146,8 +146,8 @@ function renderThread() {
 
 function renderSession() {
   var mine = current();
-  el("spBtn1").className = state.owner === "sp-1" ? "active" : "";
-  el("spBtn2").className = state.owner === "sp-2" ? "active" : "";
+  el("spBtn1").className = state.owner === "acct_salesperson" ? "active" : "";
+  el("spBtn2").className = state.owner === "acct_salesperson_2" ? "active" : "";
   el("sessionStatus").textContent = mine.sessionId
     ? "Session " + (mine.closed ? "closed" : "open") + " · step: " + (mine.step || "intake") + " · " + state.owner
     : "Opening session…";
@@ -169,8 +169,8 @@ function renderApproval() {
 }
 
 function renderPanels() {
-  api("/records").then(function (result) {
-    var list = el("recordsList");
+  api("/change-log?as=" + encodeURIComponent(state.owner)).then(function (result) {
+    var list = el("changeLogList");
     list.textContent = "";
     var entries = result.body.entries || [];
     if (entries.length === 0) {
@@ -181,7 +181,7 @@ function renderPanels() {
       var li = document.createElement("li");
       var head = document.createElement("span");
       head.className = "action";
-      head.textContent = "#" + entry.seq + " " + entry.action + " ";
+      head.textContent = "#" + entry._id + " " + entry.action + " ";
       var rest = document.createElement("span");
       rest.textContent = "by " + entry.actor + " — " + entry.detail + " ";
       var hash = document.createElement("span");
@@ -193,7 +193,7 @@ function renderPanels() {
       list.appendChild(li);
     });
   });
-  api("/outbox").then(function (result) {
+  api("/outbox?as=" + encodeURIComponent(state.owner)).then(function (result) {
     var list = el("outboxList");
     list.textContent = "";
     var entries = result.body.entries || [];
@@ -219,7 +219,7 @@ function refresh() {
 function sendChat(text) {
   var mine = current();
   pushMessage("user", text);
-  return postJson("/chat", { sessionId: mine.sessionId, as: state.owner, text: text }).then(function (result) {
+  return postJson("/chat?as=" + encodeURIComponent(state.owner), { sessionId: mine.sessionId, text: text }).then(function (result) {
     if (result.body.ok) {
       mine.step = result.body.step;
       mine.pending = result.body.pendingApproval || null;
@@ -238,7 +238,7 @@ function openSession(owner) {
   if (mine.sessionId) {
     return;
   }
-  postJson("/session", { ownerId: owner }).then(function (result) {
+  postJson("/session?as=" + encodeURIComponent(owner), {}).then(function (result) {
     if (result.body.ok) {
       mine.sessionId = result.body.session.id;
       mine.step = result.body.session.step;
@@ -251,8 +251,8 @@ function openSession(owner) {
   });
 }
 
-el("spBtn1").addEventListener("click", function () { openSession("sp-1"); });
-el("spBtn2").addEventListener("click", function () { openSession("sp-2"); });
+el("spBtn1").addEventListener("click", function () { openSession("acct_salesperson"); });
+el("spBtn2").addEventListener("click", function () { openSession("acct_salesperson_2"); });
 
 el("chatForm").addEventListener("submit", function (event) {
   event.preventDefault();
@@ -270,7 +270,7 @@ el("approveBtn").addEventListener("click", function () {
     return;
   }
   var approvalId = mine.pending.id;
-  postJson("/approve/" + encodeURIComponent(approvalId), { as: state.owner }).then(function (result) {
+  api("/approve/" + encodeURIComponent(approvalId) + "?as=" + encodeURIComponent(state.owner), { method: "POST" }).then(function (result) {
     if (result.body.ok) {
       mine.pending = null;
       pushMessage("system", "Approved — the change was written to the outbox and recorded in the change log.");
@@ -311,7 +311,7 @@ el("resumeBtn").addEventListener("click", function () {
   });
 });
 
-openSession("sp-1");
+openSession("acct_salesperson");
 </script>
 </body>
 </html>

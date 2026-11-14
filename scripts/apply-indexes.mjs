@@ -1,5 +1,6 @@
 /**
- * Create the database indexes defined in db/indexes.json.
+ * Create the database indexes defined in db/indexes.json, plus the
+ * Atlas Vector Search index defined in db/vector-index.json.
  *
  * This script runs outside the Worker, by a person who holds the
  * database secret: it reads MONGODB_URI (required) and MONGODB_DB
@@ -10,6 +11,10 @@
  *
  * Run it once when the database is first set up, and again after the
  * index definitions change; creating an existing index is a no-op.
+ * The vector search index is applied with createSearchIndex, which
+ * only Atlas supports; if that fails the script says so and exits
+ * non-zero, because a silently missing search index would hide behind
+ * the keyword fallback.
  */
 
 import { readFile } from "node:fs/promises";
@@ -22,13 +27,13 @@ import { MongoClient } from "mongodb";
 const SERVER_SELECTION_TIMEOUT_MS = 10000;
 
 /**
- * Read and parse db/indexes.json from the repository root.
- * The path is resolved from this script's location, so the script can
+ * Read and parse a JSON definition file from the repo's db/ folder.
+ * Paths are resolved from this script's location, so the script can
  * be run from any working directory.
  */
-async function loadIndexDefinitions() {
+async function loadDefinition(fileName) {
   const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-  const raw = await readFile(path.join(root, "db", "indexes.json"), "utf8");
+  const raw = await readFile(path.join(root, "db", fileName), "utf8");
   return JSON.parse(raw);
 }
 
@@ -51,9 +56,26 @@ async function applyIndexes(db, definitions) {
 }
 
 /**
+ * Create the Atlas Vector Search index from db/vector-index.json.
+ * Search indexes are created differently from regular indexes, so
+ * this goes through createSearchIndex with the definition's name,
+ * type and fields. Returns the index name. Creating an existing
+ * search index is a no-op on Atlas.
+ */
+async function applyVectorIndex(db, definition) {
+  const name = await db.collection(definition.collection).createSearchIndex({
+    name: definition.name,
+    type: definition.type,
+    definition: definition.definition,
+  });
+  console.log(`${definition.collection}: search index ${name}`);
+  return name;
+}
+
+/**
  * Entry point: connect with a fresh client, apply the indexes, and
  * always close the client. Exits non-zero without connecting when
- * MONGODB_URI is missing.
+ * MONGODB_URI is missing, and non-zero if any index fails to apply.
  */
 async function main() {
   const uri = process.env.MONGODB_URI;
@@ -62,15 +84,22 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  const definitions = await loadIndexDefinitions();
+  const definitions = await loadDefinition("indexes.json");
   const dbName = process.env.MONGODB_DB ?? definitions.database;
   const client = new MongoClient(uri, {
     serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS,
   });
   try {
     await client.connect();
-    const applied = await applyIndexes(client.db(dbName), definitions);
+    const db = client.db(dbName);
+    const applied = await applyIndexes(db, definitions);
     console.log(`Applied ${applied} indexes to database "${dbName}".`);
+    const vector = await loadDefinition("vector-index.json");
+    await applyVectorIndex(db, vector);
+    console.log(`Applied the vector search index to database "${dbName}".`);
+  } catch (error) {
+    console.error(`Failed to apply indexes: ${error.message}`);
+    process.exitCode = 1;
   } finally {
     await client.close();
   }

@@ -1,23 +1,32 @@
 /**
- * The scripted chat: the agent's voice for the demo, with no model in
- * the loop.
+ * The chat: the agent's voice for the demo.
  *
- * Replies are chosen by plain keyword and intent matching, so the demo
- * behaves the same way on every run and never depends on a live model
- * call. A later layer can put a model behind this same surface; the
- * governance underneath would not change. The script walks one working
- * session through the demo path — intake, stakeholder confirmation, a
- * campaign proposal that waits for approval — and answers three
- * governance intents at any step: correct a remembered note (the old
- * value stays in the note's history), forget the budget note (its
- * content is removed, not hidden), and ask for another salesperson's
- * account (refused generically through the memory read rule, so the
- * refusal itself lands in the record log). Unknown input gets a
- * scripted reply that nudges back toward the demo path.
+ * The demo-critical intents — intake, correct, forget, propose, and
+ * every refusal — are scripted and deterministic: replies are chosen
+ * by plain keyword and intent matching, so the demo behaves the same
+ * way on every run. Only free-form replies, after the demo path is
+ * complete, may come from a model (see `model.ts`); when no model is
+ * configured, or the model call fails, the scripted reply answers
+ * instead, so a model can never break the demo.
+ *
+ * The chat works on whatever the store holds: accounts are read from
+ * the store (the seeded database when one is connected), never from a
+ * hard-coded sample, and no memory is invented for an account — the
+ * only items the chat writes are the session's own stakeholder and
+ * budget notes. The script walks one working session through the demo
+ * path — intake, a stakeholder note drafted with the first two roles
+ * swapped, the correction that fixes it through the memory service
+ * (the draft stays in the note's history), a campaign proposal at
+ * sample prices that waits for approval, and the approval landing in
+ * the outbox — and answers three governance intents at any step:
+ * correct the note, forget the budget note (its content is removed,
+ * not hidden), and ask for another salesperson's account (refused
+ * generically through a governed read, so the refusal itself lands in
+ * the change log).
  */
 
 import type { Approval, MemoryService } from "./memory";
-import { seedState, type Account } from "./seed";
+import type { ModelClient } from "./model";
 import type { Session, SessionService } from "./session";
 import type { JsonRecord, Store } from "./store";
 
@@ -25,22 +34,88 @@ import type { JsonRecord, Store } from "./store";
 export type ChatResult =
   | {
       ok: true;
-      /** The scripted reply to show the salesperson. */
+      /** The reply to show the salesperson. */
       reply: string;
       /** The session's step after this message. */
       step: string;
       /** The proposal waiting for approval, when there is one. */
       pendingApproval?: Approval;
     }
-  | { ok: false; error: "not yours" | "not found" | "not open" };
+  | { ok: false; error: "not found" | "not open" };
 
 /** The result of opening a session through the chat service. */
 export type OpenSessionResult =
   | { ok: true; session: Session }
   | { ok: false; error: "no account" };
 
+/** The collection accounts live in; matches the governed services. */
+const ACCOUNTS = "accounts";
+
 /** The collection memory items live in; matches the memory service. */
-const ITEMS = "memory_items";
+const MEMORIES = "memories";
+
+/** The collection products live in; the proposal prices from these. */
+const PRODUCTS = "products";
+
+/** The collection prices live in; shared, and always samples. */
+const PRICING = "pricing";
+
+/** One stakeholder on an account, as stored: a name and their role. */
+interface StoredStakeholder {
+  name: string;
+  role: string;
+}
+
+/**
+ * An account as the chat needs it, read from the store.
+ * The store's document is the source; this is only the shape the chat
+ * relies on, parsed tolerantly — a document without a stakeholder list
+ * simply has none, instead of the chat guessing at one.
+ */
+interface StoredAccount {
+  id: string;
+  name: string;
+  owner_salesperson_id: string;
+  stakeholders: StoredStakeholder[];
+}
+
+/**
+ * Read a stored document as an account, or return `undefined` when it
+ * does not carry the fields an account must have (an id — its own or
+ * its `_id` key — a name, and an owner).
+ */
+function asAccount(raw: JsonRecord): StoredAccount | undefined {
+  const id = raw.id ?? raw._id;
+  if (
+    typeof id !== "string" ||
+    typeof raw.name !== "string" ||
+    typeof raw.owner_salesperson_id !== "string"
+  ) {
+    return undefined;
+  }
+  const stakeholders: StoredStakeholder[] = [];
+  if (Array.isArray(raw.stakeholders)) {
+    for (const person of raw.stakeholders) {
+      if (
+        typeof person === "object" &&
+        person !== null &&
+        typeof (person as JsonRecord).name === "string" &&
+        typeof (person as JsonRecord).role === "string"
+      ) {
+        stakeholders.push({
+          name: (person as JsonRecord).name as string,
+          role: (person as JsonRecord).role as string,
+        });
+      }
+    }
+  }
+  return {
+    id,
+    name: raw.name,
+    owner_salesperson_id: raw.owner_salesperson_id,
+    stakeholders,
+  };
+}
 
 /**
  * Read a string field out of a session's saved data.
@@ -53,20 +128,11 @@ function stringField(data: JsonRecord, field: string): string | undefined {
 }
 
 /**
- * The deterministic id of an account's profile memory item.
- * One naming rule, shared by the writer (session open) and the reader
- * (the cross-account refusal), so both sides always mean the same item.
- */
-function profileItemId(account: Account): string {
-  return `account-profile-${account.id}`;
-}
-
-/**
  * Render an account's stakeholder list as one sentence.
  * `roles` is parallel to the account's stakeholders, so the caller can
  * render the account's true roles or a draft with roles swapped.
  */
-function stakeholderText(account: Account, roles: string[]): string {
+function stakeholderText(account: StoredAccount, roles: string[]): string {
   const parts = account.stakeholders.map(
     (person, index) => `${person.name} — ${roles[index]}`,
   );
@@ -80,7 +146,7 @@ function stakeholderText(account: Account, roles: string[]): string {
  * fixes it through the memory service, which keeps this draft in the
  * note's history. Accounts with one stakeholder are drafted as-is.
  */
-function draftStakeholderText(account: Account): string {
+function draftStakeholderText(account: StoredAccount): string {
   const roles = account.stakeholders.map((person) => person.role);
   if (roles.length >= 2) {
     [roles[0], roles[1]] = [roles[1], roles[0]];
@@ -93,7 +159,7 @@ function draftStakeholderText(account: Account): string {
  * This is what a correction writes, so a corrected note always matches
  * the account of record.
  */
-function trueStakeholderText(account: Account): string {
+function trueStakeholderText(account: StoredAccount): string {
   return stakeholderText(
     account,
     account.stakeholders.map((person) => person.role),
@@ -116,11 +182,22 @@ function isCorrection(text: string): boolean {
 }
 
 /**
- * The scripted chat service over the governed services.
+ * The scripted lines the proposal falls back to when the store holds
+ * no pricing rows: the demo's sample prices, labelled as samples.
+ * Used only to render the proposal text; nothing is stored from here.
+ */
+const SAMPLE_PRICE_LINES: readonly string[] = [
+  "Managed Native Advertising at $5 CPC (per click) — sample price",
+  "Managed Display Advertising at $25 vCPM (per 1,000 viewable impressions) — sample price",
+];
+
+/**
+ * The chat service over the governed services.
  *
  * Holds no state of its own: sessions, memory items, approvals, and the
- * record log all live in the store behind the services it wraps, so a
- * fresh instance per request behaves exactly like a shared one.
+ * change log all live in the store behind the services it wraps, so a
+ * fresh instance per request behaves exactly like a shared one. The
+ * model client is optional and is consulted only for free-form replies.
  */
 export class ChatService {
   /** Wrap the memory service, the session service, and their store. */
@@ -128,32 +205,37 @@ export class ChatService {
     private readonly memory: MemoryService,
     private readonly sessions: SessionService,
     private readonly store: Store,
+    private readonly model?: ModelClient,
   ) {}
 
   /**
-   * Open a working session for one salesperson on their sample account.
-   * Fails closed with "no account" when the id names no seeded
-   * salesperson's account. Opening any session first makes sure every
-   * seeded account has a profile memory item owned by its salesperson,
-   * so a later cross-account ask can be refused through the read rule
-   * (and logged) instead of merely missing.
+   * Open a working session for one salesperson on their account.
+   * The account is read from the store; when the salesperson owns
+   * several, the first by id is used, so the choice is deterministic.
+   * Fails closed with "no account" when the id owns no account in the
+   * store. The session service makes the final ownership check.
    */
   async openSession(ownerId: string): Promise<OpenSessionResult> {
-    const state = seedState();
-    const account = state.accounts.find((entry) => entry.ownerId === ownerId);
+    const accounts = await this.accounts();
+    const owned = accounts
+      .filter((account) => account.owner_salesperson_id === ownerId)
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const account = owned[0];
     if (account === undefined) {
       return { ok: false, error: "no account" };
     }
-    await this.ensureAccountProfiles();
-    const session = await this.sessions.open(ownerId, account.id);
-    return { ok: true, session };
+    const opened = await this.sessions.open(ownerId, account.id);
+    if (!opened.ok) {
+      return { ok: false, error: "no account" };
+    }
+    return { ok: true, session: opened.session };
   }
 
   /**
    * Handle one message from `ownerId` in one of their sessions.
    * The session is loaded through the session service, so another
-   * owner's session is refused generically ("not yours") and a closed
-   * session fails closed ("not open") before any intent is considered.
+   * owner's session gets the generic refusal and a closed session
+   * fails closed ("not open") before any intent is considered.
    * Intents (another account, forget, correct) are checked before the
    * step script, so they work at any point in the conversation.
    */
@@ -164,32 +246,25 @@ export class ChatService {
   ): Promise<ChatResult> {
     const loaded = await this.sessions.get(sessionId, ownerId);
     if (!loaded.ok) {
-      // `get` fails only as "not yours" or "not found"; anything else
-      // would be a programming error, so fail closed as "not found".
-      return {
-        ok: false,
-        error: loaded.error === "not yours" ? "not yours" : "not found",
-      };
+      return { ok: false, error: "not found" };
     }
     const session = loaded.session;
     if (session.status !== "open") {
       return { ok: false, error: "not open" };
     }
-    const account = seedState().accounts.find(
-      (entry) => entry.id === session.accountId,
-    );
+    const account = await this.accountById(session.accountId);
     if (account === undefined) {
       return { ok: false, error: "not found" };
     }
     const lower = text.toLowerCase();
 
-    const other = this.matchOtherAccount(ownerId, lower);
+    const other = await this.matchOtherAccount(ownerId, lower);
     if (other !== undefined) {
-      // The read rule decides: a cross-owner recall is refused by the
-      // memory service and the refusal is written to the record log.
-      // The reply is the same whatever the recall found, and carries
+      // A governed read decides: the attempt is refused by the read
+      // rule or the ownership check and written to the change log.
+      // The reply is the same whatever the read found, and carries
       // none of the other account's data.
-      await this.memory.recall(ownerId, profileItemId(other));
+      await this.refuseOtherAccountRead(ownerId, other);
       return this.withPending(
         session,
         "I can't show you that. Accounts and their memory belong to the " +
@@ -206,43 +281,72 @@ export class ChatService {
         return corrected;
       }
     }
-    return this.handleStep(ownerId, session, account);
+    const stepped = await this.handleStep(ownerId, session, account);
+    if (stepped !== null) {
+      return stepped;
+    }
+    return this.freeForm(ownerId, session, account, text);
+  }
+
+  /** Read every account in the store, in the shape the chat relies on. */
+  private async accounts(): Promise<StoredAccount[]> {
+    const raw = await this.store.list(ACCOUNTS);
+    const accounts: StoredAccount[] = [];
+    for (const record of raw) {
+      const account = asAccount(record);
+      if (account !== undefined) {
+        accounts.push(account);
+      }
+    }
+    return accounts;
+  }
+
+  /** Read one account from the store by id, in the chat's shape. */
+  private async accountById(accountId: string): Promise<StoredAccount | undefined> {
+    const raw = await this.store.get(ACCOUNTS, accountId);
+    return raw === undefined ? undefined : asAccount(raw);
   }
 
   /**
-   * Make sure every seeded account has a profile memory item, owned by
-   * that account's salesperson and holding the account's stakeholder
-   * list — the data the read rule exists to protect. Items that already
-   * exist are left untouched, so this adds no duplicate log entries.
+   * Make one governed read attempt against another salesperson's
+   * account, purely so the refusal is decided by the governed services
+   * and written to the change log. Prefers recalling one of the other
+   * owner's memory items through the read rule; when the store holds
+   * none, the session service's ownership check on the account itself
+   * is the probe — it refuses and logs, and stores nothing either way.
+   * The result is deliberately discarded: the caller answers generically.
    */
-  private async ensureAccountProfiles(): Promise<void> {
-    for (const account of seedState().accounts) {
-      const id = profileItemId(account);
-      if ((await this.store.get(ITEMS, id)) === undefined) {
-        await this.memory.remember(account.ownerId, {
-          id,
-          kind: "account-profile",
-          text:
-            `Account profile for ${account.name}. ` +
-            trueStakeholderText(account),
-        });
-      }
+  private async refuseOtherAccountRead(
+    ownerId: string,
+    other: StoredAccount,
+  ): Promise<void> {
+    const memories = await this.store.list(MEMORIES);
+    const theirs = memories.filter(
+      (record) => record.owner_salesperson_id === other.owner_salesperson_id,
+    );
+    const item =
+      theirs.find((record) => record.accountId === other.id) ?? theirs[0];
+    const itemId = item === undefined ? undefined : (item.id ?? item._id);
+    if (typeof itemId === "string") {
+      await this.memory.recall(ownerId, itemId);
+      return;
     }
+    await this.sessions.open(ownerId, other.id);
   }
 
   /**
    * Find another salesperson's account a message is asking about.
-   * Matches on the account's name words, its stakeholders' names, the
-   * owning salesperson's name or id, or plain phrasing like "other
-   * account". The caller's own accounts are never matched.
+   * Matches on the account's name words or its stakeholders' names, or
+   * plain phrasing like "other account". The caller's own accounts are
+   * never matched.
    */
-  private matchOtherAccount(
+  private async matchOtherAccount(
     ownerId: string,
     lowerText: string,
-  ): Account | undefined {
-    const state = seedState();
-    const others = state.accounts.filter(
-      (account) => account.ownerId !== ownerId,
+  ): Promise<StoredAccount | undefined> {
+    const accounts = await this.accounts();
+    const others = accounts.filter(
+      (account) => account.owner_salesperson_id !== ownerId,
     );
     for (const account of others) {
       const tokens = new Set<string>();
@@ -253,13 +357,6 @@ export class ChatService {
       }
       for (const person of account.stakeholders) {
         tokens.add(person.name.toLowerCase());
-      }
-      const owner = state.salespeople.find(
-        (person) => person.id === account.ownerId,
-      );
-      if (owner !== undefined) {
-        tokens.add(owner.id);
-        tokens.add(owner.displayName.toLowerCase().split(" ")[0]);
       }
       for (const token of tokens) {
         if (token !== "" && lowerText.includes(token)) {
@@ -329,7 +426,7 @@ export class ChatService {
   private async handleCorrect(
     ownerId: string,
     session: Session,
-    account: Account,
+    account: StoredAccount,
   ): Promise<ChatResult | null> {
     const itemId = stringField(session.data, "stakeholderItemId");
     if (itemId === undefined) {
@@ -357,14 +454,14 @@ export class ChatService {
    * builds the proposal and its budget note, and the proposal step
    * watches for the approval the card performs. Any input advances the
    * script at the intake and confirmation steps — the intents have
-   * already had their chance to intercept it.
+   * already had their chance to intercept it. Returns null at the
+   * final step, where the conversation is free-form.
    */
   private async handleStep(
     ownerId: string,
     session: Session,
-    account: Account,
-  ): Promise<ChatResult> {
-    const state = seedState();
+    account: StoredAccount,
+  ): Promise<ChatResult | null> {
     if (session.step === "intake") {
       const itemId = `stakeholders-${session.id}`;
       const draft = draftStakeholderText(account);
@@ -380,14 +477,11 @@ export class ChatService {
         { stakeholderItemId: itemId },
       );
       const next = advanced.ok ? advanced.session : session;
-      const person = state.salespeople.find((entry) => entry.id === ownerId);
-      const greeting =
-        person === undefined ? "Hi." : `Hi ${person.displayName.split(" ")[0]}.`;
       return this.withPending(
         next,
-        `${greeting} Let's work on ${account.name}. From the intake ` +
-          `notes I drafted this stakeholder note: "${draft}" If a role ` +
-          "is wrong, tell me the correction — the draft stays in the " +
+        `Let's work on ${account.name}. From the intake notes I ` +
+          `drafted this stakeholder note: "${draft}" If a role is ` +
+          "wrong, tell me the correction — the draft stays in the " +
           'note\'s history. Or say "looks good" and I\'ll put together ' +
           "the campaign proposal. All prices today are sample prices.",
       );
@@ -399,35 +493,31 @@ export class ChatService {
         kind: "budget",
         text:
           `Budget note for ${account.name}: the monthly budget figure ` +
-          "discussed is $4,000 (sample figure).",
+          "discussed is $40,000 (sample figure).",
       });
-      const priced = state.pricing
-        .map((price) => {
-          const product = state.products.find(
-            (entry) => entry.id === price.productId,
-          );
-          const name = product === undefined ? price.productId : product.name;
-          return (
-            `${name} at $${price.amountUsd} ${price.model} ` +
-            `(${price.unit}) — sample price`
-          );
-        })
-        .join("; ");
+      const priced = await this.priceLines();
       const names = account.stakeholders
         .map((person) => `${person.name} (${person.role})`)
         .join(", ");
       const description =
         `Campaign proposal for ${account.name}: ${priced}. ` +
         `Prepared for stakeholders: ${names}.`;
-      const approval = await this.memory.propose(ownerId, {
+      const proposal = await this.memory.propose(ownerId, {
         description,
         accountId: account.id,
       });
+      if (!proposal.ok) {
+        return this.withPending(
+          session,
+          "I couldn't put that proposal together — the account check " +
+            "refused it. Nothing was proposed or sent onward.",
+        );
+      }
       const advanced = await this.sessions.advance(
         session.id,
         ownerId,
         "proposal",
-        { budgetItemId, approvalId: approval.id },
+        { budgetItemId, approvalId: proposal.approval.id },
       );
       const next = advanced.ok ? advanced.session : session;
       return this.withPending(
@@ -465,6 +555,71 @@ export class ChatService {
           "Approve button in the card on the right. Nothing is sent " +
           "onward until you approve it.",
       );
+    }
+    return null;
+  }
+
+  /**
+   * Render the proposal's price lines from the store's pricing rows,
+   * joined into one sentence. Rows whose product or amount cannot be
+   * read are skipped; when no row renders, the demo's sample price
+   * lines answer instead, so the proposal always carries labelled
+   * sample prices.
+   */
+  private async priceLines(): Promise<string> {
+    const pricing = await this.store.list(PRICING);
+    const products = await this.store.list(PRODUCTS);
+    const lines: string[] = [];
+    for (const price of pricing) {
+      const amount = price.amountUsd ?? price.amount;
+      if (
+        typeof price.productId !== "string" ||
+        typeof price.model !== "string" ||
+        typeof price.unit !== "string" ||
+        typeof amount !== "number"
+      ) {
+        continue;
+      }
+      const product = products.find(
+        (entry) => (entry.id ?? entry._id) === price.productId,
+      );
+      const name =
+        product !== undefined && typeof product.name === "string"
+          ? product.name
+          : price.productId;
+      lines.push(
+        `${name} at $${amount} ${price.model} (${price.unit}) — sample price`,
+      );
+    }
+    return (lines.length > 0 ? lines : [...SAMPLE_PRICE_LINES]).join("; ");
+  }
+
+  /**
+   * Answer a free-form message once the demo path is complete.
+   * When a model is configured it may write this reply; any failure —
+   * or no model at all — falls back to the scripted line, so the
+   * conversation never depends on the model working.
+   */
+  private async freeForm(
+    ownerId: string,
+    session: Session,
+    account: StoredAccount,
+    text: string,
+  ): Promise<ChatResult> {
+    if (this.model !== undefined) {
+      try {
+        const reply = await this.model.complete(
+          `You are the assistant in a governed sales-memory demo. The ` +
+            `salesperson is working on the account "${account.name}" ` +
+            `and the campaign proposal for it is approved and in the ` +
+            `outbox. Answer briefly and helpfully. Prices are sample ` +
+            `prices. The salesperson says: ${text}`,
+        );
+        return this.withPending(session, reply);
+      } catch {
+        // Fall through to the scripted reply: a model failure must
+        // never break the conversation.
+      }
     }
     return this.withPending(
       session,

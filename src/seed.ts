@@ -1,16 +1,20 @@
 /**
- * Sample seed data for the skeleton.
+ * Sample seed data for local development and tests.
  *
  * Everything here is fictional sample data, labelled as samples wherever a
- * price or an account appears. Two sample salespeople each own their own
+ * price or an account appears. The fixtures mirror the story the demo
+ * runs on — the Willow & Co. account, its two stakeholders, and the
+ * second salesperson's own account — so tests exercise the same shape
+ * the seeded database holds. Two sample salespeople each own their own
  * sample account; the product list and its sample pricing are shared.
- * Records that belong to one salesperson carry an `ownerId` so later work
- * can prove one salesperson's data never leaks into another's.
+ * Records that belong to one salesperson carry an
+ * `owner_salesperson_id` so later work can prove one salesperson's data
+ * never leaks into another's.
  */
 
 import { MemoryStore, type Store } from "./store";
 
-/** A salesperson. Their `id` is the `ownerId` on everything they own. */
+/** A salesperson. Their `id` is the `owner_salesperson_id` on everything they own. */
 export interface Salesperson {
   id: string;
   displayName: string;
@@ -45,12 +49,13 @@ export interface Stakeholder {
 }
 
 /**
- * A customer account owned by exactly one salesperson, named by `ownerId`.
- * `sample` is always `true`: accounts here are fictional samples.
+ * A customer account owned by exactly one salesperson, named by
+ * `owner_salesperson_id`. `sample` is always `true`: accounts here are
+ * fictional samples.
  */
 export interface Account {
   id: string;
-  ownerId: string;
+  owner_salesperson_id: string;
   name: string;
   stakeholders: Stakeholder[];
   sample: true;
@@ -73,8 +78,8 @@ export interface SeedState {
 export function seedState(): SeedState {
   return {
     salespeople: [
-      { id: "sp-1", displayName: "Riley Park" },
-      { id: "sp-2", displayName: "Jordan Lee" },
+      { id: "acct_salesperson", displayName: "Salesperson 1" },
+      { id: "acct_salesperson_2", displayName: "Salesperson 2" },
     ],
     products: [
       {
@@ -110,18 +115,18 @@ export function seedState(): SeedState {
     ],
     accounts: [
       {
-        id: "acct-north-bakery",
-        ownerId: "sp-1",
-        name: "North Bakery (sample account)",
+        id: "acct-willow-co",
+        owner_salesperson_id: "acct_salesperson",
+        name: "Willow & Co. (sample account)",
         stakeholders: [
-          { name: "Priya", role: "Marketing lead" },
+          { name: "Priya", role: "CMO" },
           { name: "Dan", role: "Owner" },
         ],
         sample: true,
       },
       {
         id: "acct-harbour-bikes",
-        ownerId: "sp-2",
+        owner_salesperson_id: "acct_salesperson_2",
         name: "Harbour Bike Shop (sample account)",
         stakeholders: [{ name: "Mina", role: "Operations lead" }],
         sample: true,
@@ -135,22 +140,23 @@ export function seedState(): SeedState {
  *
  * Each call builds an independent store, so per-request callers never see
  * each other's edits. Collections are named "salespeople", "products",
- * "pricing", and "accounts", keyed by each record's `id`.
+ * "pricing", and "accounts". Every stored document is keyed by an `_id`
+ * field equal to the record's `id`, matching the database seed.
  */
 export async function seededStore(): Promise<Store> {
   const state = seedState();
   const store = new MemoryStore();
   for (const person of state.salespeople) {
-    await store.put("salespeople", person.id, { ...person });
+    await store.put("salespeople", person.id, { _id: person.id, ...person });
   }
   for (const product of state.products) {
-    await store.put("products", product.id, { ...product });
+    await store.put("products", product.id, { _id: product.id, ...product });
   }
   for (const price of state.pricing) {
-    await store.put("pricing", price.id, { ...price });
+    await store.put("pricing", price.id, { _id: price.id, ...price });
   }
   for (const account of state.accounts) {
-    await store.put("accounts", account.id, { ...account });
+    await store.put("accounts", account.id, { _id: account.id, ...account });
   }
   return store;
 }
