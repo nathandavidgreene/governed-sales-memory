@@ -16,8 +16,8 @@ import type { Store } from "./store";
 
 /**
  * Build a fresh session service and log over a seeded store, so the
- * seed accounts exist with their owners (acct_salesperson owns acct-willow-co,
- * acct_salesperson_2 owns acct-harbour-bikes) and a test can assert on behaviour,
+ * seed accounts exist with their owners (acct_salesperson owns acct_willow
+ * and acct_harbor, acct_salesperson_2 owns acct_juniper) and a test can assert on behaviour,
  * stored state, and the recorded evidence together.
  */
 async function freshSessions(): Promise<{
@@ -55,7 +55,7 @@ describe("SessionService open (account ownership)", () => {
    */
   it("refuses an open on the other salesperson's account and logs it", async () => {
     const { service, log, store } = await freshSessions();
-    const result = await service.open("acct_salesperson_2", "acct-willow-co");
+    const result = await service.open("acct_salesperson_2", "acct_willow");
     expect(result).toEqual({ ok: false, error: "not found" });
     await expect(store.list("sessions")).resolves.toEqual([]);
     const refusals = (await log.entries()).filter(
@@ -63,7 +63,7 @@ describe("SessionService open (account ownership)", () => {
     );
     expect(refusals).toHaveLength(1);
     expect(refusals[0].actor).toBe("acct_salesperson_2");
-    expect(refusals[0].subject).toBe("acct-willow-co");
+    expect(refusals[0].subject).toBe("acct_willow");
   });
 
   /**
@@ -74,7 +74,7 @@ describe("SessionService open (account ownership)", () => {
   it("refuses an open on a missing account with the same generic answer", async () => {
     const { service, store } = await freshSessions();
     const missing = await service.open("acct_salesperson", "acct-never-existed");
-    const crossOwner = await service.open("acct_salesperson_2", "acct-willow-co");
+    const crossOwner = await service.open("acct_salesperson_2", "acct_willow");
     expect(missing).toEqual({ ok: false, error: "not found" });
     expect(missing).toEqual(crossOwner);
     await expect(store.list("sessions")).resolves.toEqual([]);
@@ -90,7 +90,7 @@ describe("SessionService close and resume", () => {
    */
   it("resumes a closed session at its exact step with its data", async () => {
     const { service, log } = await freshSessions();
-    const opened = await mustOpen(service, "acct_salesperson", "acct-willow-co");
+    const opened = await mustOpen(service, "acct_salesperson", "acct_willow");
     expect(opened.step).toBe("intake");
     expect(opened.status).toBe("open");
     const advanced = await service.advance(opened.id, "acct_salesperson", "approval", {
@@ -127,7 +127,7 @@ describe("SessionService close and resume", () => {
    */
   it("refuses a resume by the other salesperson and stays closed", async () => {
     const { service, log, store } = await freshSessions();
-    const opened = await mustOpen(service, "acct_salesperson", "acct-willow-co");
+    const opened = await mustOpen(service, "acct_salesperson", "acct_willow");
     await service.advance(opened.id, "acct_salesperson", "stakeholders");
     await service.close(opened.id, "acct_salesperson");
     const result = await service.resume(opened.id, "acct_salesperson_2");
@@ -148,7 +148,7 @@ describe("SessionService close and resume", () => {
    */
   it("fails closed when resuming a session that is still open", async () => {
     const { service } = await freshSessions();
-    const opened = await mustOpen(service, "acct_salesperson", "acct-willow-co");
+    const opened = await mustOpen(service, "acct_salesperson", "acct_willow");
     await expect(service.resume(opened.id, "acct_salesperson")).resolves.toEqual({
       ok: false,
       error: "not closed",
@@ -161,12 +161,12 @@ describe("SessionService close and resume", () => {
    */
   it("stores the session keyed by _id with owner_salesperson_id", async () => {
     const { service, store } = await freshSessions();
-    const opened = await mustOpen(service, "acct_salesperson", "acct-willow-co");
+    const opened = await mustOpen(service, "acct_salesperson", "acct_willow");
     const stored = await store.get("sessions", opened.id);
     expect(stored).toMatchObject({
       _id: opened.id,
       owner_salesperson_id: "acct_salesperson",
-      accountId: "acct-willow-co",
+      accountId: "acct_willow",
     });
     expect(stored).not.toHaveProperty("ownerId");
   });

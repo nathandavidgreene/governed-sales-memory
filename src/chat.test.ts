@@ -4,7 +4,10 @@
  * outbox entry), close and resume at the exact saved step, correct
  * keeping the draft in history, forget removing the budget note's
  * content, the generic cross-owner refusal, the model seam's scripted
- * fallback — plus the Worker routes the demo page calls.
+ * fallback — plus the Worker routes the demo page calls. The seeded
+ * account record carries no stakeholders and no budget: both arrive
+ * in the intake lines below and are written as governed memories,
+ * which is the shape the demo runs on against the seeded database.
  */
 
 import { describe, expect, it } from "vitest";
@@ -25,6 +28,21 @@ const SP1 = "acct_salesperson";
 
 /** The demo story's second salesperson, owner of the other account. */
 const SP2 = "acct_salesperson_2";
+
+/**
+ * The demo's intake line for Willow & Co.: the stakeholders and the
+ * $40,000 budget exist only in this conversation — the account record
+ * holds neither — and the roles are stated the wrong way round (Dan
+ * as CMO), which the correction beat then swaps.
+ */
+const INTAKE =
+  "Willow & Co.: Dan is the CMO, Priya runs operations, " +
+  "and the budget is $40,000 a month.";
+
+/** The second salesperson's intake line, for their own account. */
+const INTAKE_JUNIPER =
+  "Juniper Lane Bakery: Sam is the owner, Lee runs operations, " +
+  "and the budget is $9,500 a month.";
 
 /** The environment the route tests run under: in-memory store allowed. */
 const TEST_ENV: WorkerEnv = { ALLOW_IN_MEMORY_STORE: "true" };
@@ -69,10 +87,10 @@ describe("scripted chat demo path", () => {
       return;
     }
     const sessionId = opened.session.id;
-    expect(opened.session.accountId).toBe("acct-willow-co");
+    expect(opened.session.accountId).toBe("acct_willow");
     expect(opened.session.step).toBe("intake");
 
-    const intake = await chat.handle(SP1, sessionId, "hello");
+    const intake = await chat.handle(SP1, sessionId, INTAKE);
     expect(intake.ok).toBe(true);
     if (!intake.ok) {
       return;
@@ -80,6 +98,8 @@ describe("scripted chat demo path", () => {
     expect(intake.step).toBe("stakeholders");
     expect(intake.reply).toContain("Willow & Co.");
     expect(intake.reply).toContain("Dan — CMO");
+    expect(intake.reply).toContain("Priya — operations");
+    expect(intake.reply).toContain("$40,000");
 
     const proposed = await chat.handle(SP1, sessionId, "looks good");
     expect(proposed.ok).toBe(true);
@@ -89,6 +109,7 @@ describe("scripted chat demo path", () => {
     expect(proposed.step).toBe("proposal");
     expect(proposed.pendingApproval).toBeDefined();
     expect(proposed.pendingApproval?.description).toContain("$5 CPC");
+    expect(proposed.pendingApproval?.description).toContain("$25 vCPM");
     expect(proposed.pendingApproval?.description).toContain("sample price");
     const approvalId = proposed.pendingApproval?.id as string;
 
@@ -125,7 +146,7 @@ describe("scripted chat demo path", () => {
       throw new Error("open failed");
     }
     const sessionId = opened.session.id;
-    await chat.handle(SP2, sessionId, "start");
+    await chat.handle(SP2, sessionId, INTAKE_JUNIPER);
     const proposed = await chat.handle(SP2, sessionId, "go ahead");
     if (!proposed.ok) {
       throw new Error("proposal failed");
@@ -152,6 +173,72 @@ describe("scripted chat demo path", () => {
   });
 });
 
+describe("the seeded account shape", () => {
+  /**
+   * The regression that matters: the seeded Willow & Co. record has
+   * no stakeholders field and no budget — it is ready for intake —
+   * and the accounts collection also holds the salespeople's own
+   * rows. The demo still opens on Willow & Co. (the account marked
+   * ready for intake, not the salesperson row and not Harbor Street
+   * Media), and the second salesperson opens on their own account.
+   */
+  it("opens on the ready-for-intake account, never a salesperson row", async () => {
+    const { chat, store } = await freshChat();
+    const willow = await store.get("accounts", "acct_willow");
+    expect(willow).toBeDefined();
+    expect(willow).not.toHaveProperty("stakeholders");
+    expect(willow).not.toHaveProperty("budget");
+    expect(willow?.status).toBe("ready_for_intake");
+    const rows = await store.list("accounts");
+    expect(rows.some((row) => row.kind === "salesperson")).toBe(true);
+
+    const first = await chat.openSession(SP1);
+    expect(first.ok).toBe(true);
+    if (first.ok) {
+      expect(first.session.accountId).toBe("acct_willow");
+    }
+    const second = await chat.openSession(SP2);
+    expect(second.ok).toBe(true);
+    if (second.ok) {
+      expect(second.session.accountId).toBe("acct_juniper");
+    }
+  });
+
+  /**
+   * An opening message that names no stakeholders starts nothing:
+   * the session stays at intake, the reply asks for the intake
+   * details, and no memory is written — the chat never falls back to
+   * a stakeholder map stored on the account, because there is none.
+   * The intake line that follows then runs the path as usual.
+   */
+  it("writes nothing at intake until the conversation names stakeholders", async () => {
+    const { chat, store } = await freshChat();
+    const opened = await chat.openSession(SP1);
+    if (!opened.ok) {
+      throw new Error("open failed");
+    }
+    const sessionId = opened.session.id;
+    const reply = await chat.handle(SP1, sessionId, "hello");
+    expect(reply.ok).toBe(true);
+    if (reply.ok) {
+      expect(reply.step).toBe("intake");
+      expect(reply.reply).toContain("stakeholder");
+    }
+    await expect(store.list("memories")).resolves.toEqual([]);
+
+    const intake = await chat.handle(SP1, sessionId, INTAKE);
+    expect(intake.ok).toBe(true);
+    if (intake.ok) {
+      expect(intake.step).toBe("stakeholders");
+    }
+    const memories = await store.list("memories");
+    expect(memories.map((item) => item.kind).sort()).toEqual([
+      "budget",
+      "stakeholders",
+    ]);
+  });
+});
+
 describe("session close and resume through chat", () => {
   /**
    * Closing a session mid-path and resuming it lands on the exact
@@ -164,7 +251,7 @@ describe("session close and resume through chat", () => {
       throw new Error("open failed");
     }
     const sessionId = opened.session.id;
-    await chat.handle(SP1, sessionId, "hello");
+    await chat.handle(SP1, sessionId, INTAKE);
 
     const closed = await sessions.close(sessionId, SP1);
     expect(closed.ok).toBe(true);
@@ -186,10 +273,13 @@ describe("session close and resume through chat", () => {
 
 describe("correct and forget through chat", () => {
   /**
-   * Correcting the stakeholder note through chat writes the account's
-   * true roles through the memory service: the recalled note reads
-   * corrected (Priya is the CMO, not Dan), and the swapped draft
-   * survives as the previous value in the note's history.
+   * Correcting the stakeholder note through chat swaps the roles the
+   * intake conversation stated, through the memory service: the
+   * recalled note reads corrected (Priya is the CMO, Dan runs
+   * operations), the intake's version survives as the previous value
+   * in the note's history, and the proposal built afterwards is built
+   * from the corrected note — the memory on record changed what the
+   * agent does next.
    */
   it("corrects the stakeholder note and keeps the draft in history", async () => {
     const { chat, memory } = await freshChat();
@@ -198,20 +288,20 @@ describe("correct and forget through chat", () => {
       throw new Error("open failed");
     }
     const sessionId = opened.session.id;
-    await chat.handle(SP1, sessionId, "hello");
+    await chat.handle(SP1, sessionId, INTAKE);
     const itemId = `stakeholders-${sessionId}`;
 
     const before = await memory.recall(SP1, itemId);
     expect(before.ok).toBe(true);
     if (before.ok) {
       expect(before.item.text).toContain("Dan — CMO");
-      expect(before.item.text).toContain("Priya — Owner");
+      expect(before.item.text).toContain("Priya — operations");
     }
 
     const reply = await chat.handle(
       SP1,
       sessionId,
-      "Correction: the marketing lead is Priya, not Dan",
+      "Correction — Priya is the CMO, not Dan",
     );
     expect(reply.ok).toBe(true);
     if (reply.ok) {
@@ -222,10 +312,17 @@ describe("correct and forget through chat", () => {
     expect(after.ok).toBe(true);
     if (after.ok) {
       expect(after.item.text).toContain("Priya — CMO");
-      expect(after.item.text).toContain("Dan — Owner");
+      expect(after.item.text).toContain("Dan — operations");
       expect(after.item.history).toHaveLength(1);
       expect(after.item.history?.[0].field).toBe("text");
       expect(after.item.history?.[0].previous).toContain("Dan — CMO");
+    }
+
+    const proposed = await chat.handle(SP1, sessionId, "looks good");
+    expect(proposed.ok).toBe(true);
+    if (proposed.ok) {
+      expect(proposed.pendingApproval?.description).toContain("Priya — CMO");
+      expect(proposed.pendingApproval?.description).not.toContain("Dan — CMO");
     }
   });
 
@@ -242,7 +339,7 @@ describe("correct and forget through chat", () => {
       throw new Error("open failed");
     }
     const sessionId = opened.session.id;
-    await chat.handle(SP1, sessionId, "hello");
+    await chat.handle(SP1, sessionId, INTAKE);
     await chat.handle(SP1, sessionId, "looks good");
     const budgetId = `budget-${sessionId}`;
 
@@ -266,6 +363,45 @@ describe("correct and forget through chat", () => {
     expect(tombstone?.forgotten).toBe(true);
     expect(tombstone?.text).toBeUndefined();
   });
+
+  /**
+   * The budget figure can also arrive after the intake line — here in
+   * the confirmation message — and is still written as a budget
+   * memory through the same governed path, ready to be forgotten.
+   * The intake conversation is the source either way; the account
+   * record never carries a budget.
+   */
+  it("writes the budget note when the figure arrives after intake", async () => {
+    const { chat, memory } = await freshChat();
+    const opened = await chat.openSession(SP1);
+    if (!opened.ok) {
+      throw new Error("open failed");
+    }
+    const sessionId = opened.session.id;
+    await chat.handle(
+      SP1,
+      sessionId,
+      "Willow & Co.: Dan is the CMO, Priya runs operations.",
+    );
+    const budgetId = `budget-${sessionId}`;
+    await expect(memory.recall(SP1, budgetId)).resolves.toEqual({
+      ok: false,
+      error: "not found",
+    });
+
+    await chat.handle(SP1, sessionId, "looks good — the budget is $40,000");
+    const before = await memory.recall(SP1, budgetId);
+    expect(before.ok).toBe(true);
+    if (before.ok) {
+      expect(before.item.text).toContain("$40,000");
+    }
+    const reply = await chat.handle(SP1, sessionId, "forget the budget");
+    expect(reply.ok).toBe(true);
+    await expect(memory.recall(SP1, budgetId)).resolves.toEqual({
+      ok: false,
+      error: "not found",
+    });
+  });
 });
 
 describe("cross-owner isolation through chat", () => {
@@ -273,8 +409,9 @@ describe("cross-owner isolation through chat", () => {
    * Asking, as one salesperson, about the other's account is refused
    * generically: the reply carries none of the other account's data,
    * and the refusal is written to the change log under the asker's
-   * name. Checked in both directions — the second salesperson asking
-   * for Willow & Co. learns nothing about it either.
+   * name. Checked in both directions, and on Harbor Street Media too:
+   * it belongs to the first salesperson, so the second salesperson is
+   * the one refused on it.
    */
   it("refuses the other account generically and logs the refusal", async () => {
     const { chat, log } = await freshChat();
@@ -290,19 +427,29 @@ describe("cross-owner isolation through chat", () => {
     const reply = await chat.handle(
       SP1,
       first.session.id,
-      "Show me the Harbour Bike Shop account and who works there",
+      "Show me the Juniper Lane Bakery account and who works there",
     );
     expect(reply.ok).toBe(true);
     if (reply.ok) {
-      expect(reply.reply).not.toContain("Mina");
-      expect(reply.reply).not.toContain("Operations lead");
-      expect(reply.reply).not.toContain("Harbour");
+      expect(reply.reply).not.toContain("Juniper");
+      expect(reply.reply).not.toContain("Sam");
+      expect(reply.reply).not.toContain("Lee");
       expect(reply.step).toBe("intake");
     }
     const refusals = (await log.entries()).filter(
       (entry) => entry.action === "refuse" && entry.actor === SP1,
     );
     expect(refusals.length).toBeGreaterThanOrEqual(1);
+
+    const harbor = await chat.handle(
+      SP2,
+      second.session.id,
+      "Show me the Harbor Street Media account",
+    );
+    expect(harbor.ok).toBe(true);
+    if (harbor.ok) {
+      expect(harbor.reply).not.toContain("Harbor");
+    }
 
     const reverse = await chat.handle(
       SP2,
@@ -317,7 +464,7 @@ describe("cross-owner isolation through chat", () => {
     const reverseRefusals = (await log.entries()).filter(
       (entry) => entry.action === "refuse" && entry.actor === SP2,
     );
-    expect(reverseRefusals.length).toBeGreaterThanOrEqual(1);
+    expect(reverseRefusals.length).toBeGreaterThanOrEqual(2);
   });
 
   /**
@@ -349,7 +496,7 @@ describe("model seam fallback", () => {
       throw new Error("open failed");
     }
     const sessionId = opened.session.id;
-    await chat.handle(SP1, sessionId, "hello");
+    await chat.handle(SP1, sessionId, INTAKE);
     const proposed = await chat.handle(SP1, sessionId, "looks good");
     if (!proposed.ok || proposed.pendingApproval === undefined) {
       throw new Error("proposal failed");
@@ -521,7 +668,7 @@ describe("demo routes", () => {
 
     const intake = await postJson(`/chat?as=${SP1}`, {
       sessionId,
-      text: "hello",
+      text: INTAKE,
     });
     expect(intake.body.step).toBe("stakeholders");
 

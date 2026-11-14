@@ -19,7 +19,7 @@ import { MemoryStore, type Store } from "./store";
 /**
  * Build a fresh memory service, log, outbox, and store over one seeded
  * store, so the seed accounts exist with their owners (acct_salesperson owns
- * acct-willow-co, acct_salesperson_2 owns acct-harbour-bikes) and a test can
+ * acct_willow and acct_harbor, acct_salesperson_2 owns acct_juniper) and a test can
  * assert on behaviour, stored state, outbox contents, and the recorded
  * evidence together.
  */
@@ -181,13 +181,13 @@ describe("MemoryService propose (account ownership)", () => {
     const result = await service.propose("acct_salesperson", {
       id: "chg-1",
       description: "Send the sample proposal to the account.",
-      accountId: "acct-willow-co",
+      accountId: "acct_willow",
     });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.approval).toMatchObject({
         status: "pending",
-        accountId: "acct-willow-co",
+        accountId: "acct_willow",
         owner_salesperson_id: "acct_salesperson",
       });
     }
@@ -203,14 +203,14 @@ describe("MemoryService propose (account ownership)", () => {
     await service.propose("acct_salesperson", {
       id: "chg-1",
       description: "Send the sample proposal to the account.",
-      accountId: "acct-willow-co",
+      accountId: "acct_willow",
     });
     const stored = await store.get("approvals", "chg-1");
     expect(stored).toMatchObject({
       _id: "chg-1",
       id: "chg-1",
       owner_salesperson_id: "acct_salesperson",
-      accountId: "acct-willow-co",
+      accountId: "acct_willow",
       status: "pending",
     });
     expect(stored).not.toHaveProperty("ownerId");
@@ -227,7 +227,7 @@ describe("MemoryService propose (account ownership)", () => {
     const result = await service.propose("acct_salesperson_2", {
       id: "chg-1",
       description: "Send the sample proposal to the account.",
-      accountId: "acct-willow-co",
+      accountId: "acct_willow",
     });
     expect(result).toEqual(GENERIC_REFUSAL);
     await expect(service.getApproval("chg-1")).resolves.toBeUndefined();
@@ -236,7 +236,7 @@ describe("MemoryService propose (account ownership)", () => {
     );
     expect(refusals).toHaveLength(1);
     expect(refusals[0].actor).toBe("acct_salesperson_2");
-    expect(refusals[0].subject).toBe("acct-willow-co");
+    expect(refusals[0].subject).toBe("acct_willow");
   });
 
   /**
@@ -253,7 +253,7 @@ describe("MemoryService propose (account ownership)", () => {
     const crossOwner = await service.propose("acct_salesperson_2", {
       id: "chg-2",
       description: "Send the sample proposal to the account.",
-      accountId: "acct-willow-co",
+      accountId: "acct_willow",
     });
     expect(missing).toEqual(GENERIC_REFUSAL);
     expect(missing).toEqual(crossOwner);
@@ -273,7 +273,7 @@ describe("outbox on approve", () => {
     await service.propose("acct_salesperson", {
       id: "chg-1",
       description: "Send the sample proposal to the account.",
-      accountId: "acct-willow-co",
+      accountId: "acct_willow",
     });
     await expect(outbox.list("acct_salesperson")).resolves.toEqual([]);
     await service.approve("acct_salesperson", "chg-1");
@@ -282,7 +282,7 @@ describe("outbox on approve", () => {
     expect(entries[0]).toMatchObject({
       approvalId: "chg-1",
       owner_salesperson_id: "acct_salesperson",
-      accountId: "acct-willow-co",
+      accountId: "acct_willow",
       summary: "Send the sample proposal to the account.",
     });
   });

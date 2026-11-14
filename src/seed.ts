@@ -2,11 +2,23 @@
  * Sample seed data for local development and tests.
  *
  * Everything here is fictional sample data, labelled as samples wherever a
- * price or an account appears. The fixtures mirror the story the demo
- * runs on — the Willow & Co. account, its two stakeholders, and the
- * second salesperson's own account — so tests exercise the same shape
- * the seeded database holds. Two sample salespeople each own their own
- * sample account; the product list and its sample pricing are shared.
+ * price or an account appears. The fixtures mirror the shape of the
+ * seeded database, so tests exercise the same records the demo runs on
+ * against the database:
+ *
+ * - The Willow & Co. account (`acct_willow`) carries NO stakeholder map
+ *   and NO budget. It is `ready_for_intake`: who the stakeholders are
+ *   and what the budget is arrive in the intake conversation and are
+ *   written as governed memory items, never read off the account.
+ * - `acct_harbor` ("Harbor Street Media") belongs to the first
+ *   salesperson too, so the second salesperson is the one refused on
+ *   it; the second salesperson's own account is `acct_juniper`.
+ * - Products carry their own price wording in `rate_label` /
+ *   `sample_label`; there is no separate pricing collection.
+ * - The accounts collection also holds the salesperson rows themselves
+ *   (`kind: "salesperson"`), which are not client accounts and must
+ *   never be treated as ones.
+ *
  * Records that belong to one salesperson carry an
  * `owner_salesperson_id` so later work can prove one salesperson's data
  * never leaks into another's.
@@ -20,44 +32,34 @@ export interface Salesperson {
   displayName: string;
 }
 
-/** A product in the shared catalogue. Prices live in `Pricing` records. */
+/**
+ * A product in the shared catalogue. Its price wording lives on the
+ * product itself: `rate_label` is the sample rate as displayed (for
+ * example "$5 CPC (per click)") and `sample_label` is the label that
+ * marks it as a sample (always "sample price" here — amounts are
+ * labelled samples, never real prices).
+ */
 export interface Product {
   id: string;
   name: string;
-  description: string;
-}
-
-/**
- * A price for one product. `sample` is always `true`: amounts here are
- * labelled samples, never real prices.
- */
-export interface Pricing {
-  id: string;
-  productId: string;
-  /** How the price is charged, for example "CPC" or "vCPM". */
-  model: string;
-  /** What one unit is, for example "per click". */
-  unit: string;
-  amountUsd: number;
-  sample: true;
-}
-
-/** A named contact at a sample account. */
-export interface Stakeholder {
-  name: string;
-  role: string;
+  rate_label: string;
+  sample_label: string;
 }
 
 /**
  * A customer account owned by exactly one salesperson, named by
  * `owner_salesperson_id`. `sample` is always `true`: accounts here are
- * fictional samples.
+ * fictional samples. An account deliberately carries no stakeholder map
+ * and no budget — those live in governed memory, gathered from the
+ * intake conversation. `status` is the account's plain-word state when
+ * the seed gives it one; the demo's working account is the one whose
+ * status is "ready_for_intake".
  */
 export interface Account {
   id: string;
   owner_salesperson_id: string;
   name: string;
-  stakeholders: Stakeholder[];
+  status?: string;
   sample: true;
 }
 
@@ -65,7 +67,6 @@ export interface Account {
 export interface SeedState {
   salespeople: Salesperson[];
   products: Product[];
-  pricing: Pricing[];
   accounts: Account[];
 }
 
@@ -85,50 +86,34 @@ export function seedState(): SeedState {
       {
         id: "native-ads",
         name: "Managed Native Advertising",
-        description:
-          "Native ad campaigns planned, run, and reported on for the client.",
+        rate_label: "$5 CPC (per click)",
+        sample_label: "sample price",
       },
       {
         id: "display-ads",
         name: "Managed Display Advertising",
-        description:
-          "Display ad campaigns planned, run, and reported on for the client.",
-      },
-    ],
-    pricing: [
-      {
-        id: "price-native-cpc",
-        productId: "native-ads",
-        model: "CPC",
-        unit: "per click",
-        amountUsd: 5,
-        sample: true,
-      },
-      {
-        id: "price-display-vcpm",
-        productId: "display-ads",
-        model: "vCPM",
-        unit: "per 1,000 viewable impressions",
-        amountUsd: 25,
-        sample: true,
+        rate_label: "$25 vCPM (per 1,000 viewable impressions)",
+        sample_label: "sample price",
       },
     ],
     accounts: [
       {
-        id: "acct-willow-co",
+        id: "acct_willow",
         owner_salesperson_id: "acct_salesperson",
         name: "Willow & Co. (sample account)",
-        stakeholders: [
-          { name: "Priya", role: "CMO" },
-          { name: "Dan", role: "Owner" },
-        ],
+        status: "ready_for_intake",
         sample: true,
       },
       {
-        id: "acct-harbour-bikes",
+        id: "acct_harbor",
+        owner_salesperson_id: "acct_salesperson",
+        name: "Harbor Street Media (sample account)",
+        sample: true,
+      },
+      {
+        id: "acct_juniper",
         owner_salesperson_id: "acct_salesperson_2",
-        name: "Harbour Bike Shop (sample account)",
-        stakeholders: [{ name: "Mina", role: "Operations lead" }],
+        name: "Juniper Lane Bakery (sample account)",
         sample: true,
       },
     ],
@@ -140,20 +125,27 @@ export function seedState(): SeedState {
  *
  * Each call builds an independent store, so per-request callers never see
  * each other's edits. Collections are named "salespeople", "products",
- * "pricing", and "accounts". Every stored document is keyed by an `_id`
- * field equal to the record's `id`, matching the database seed.
+ * and "accounts". Every stored document is keyed by an `_id` field equal
+ * to the record's `id`, matching the database seed. The salespeople are
+ * written into the accounts collection as well, as rows with
+ * `kind: "salesperson"`, mirroring the database seed — readers of the
+ * accounts collection must skip those rows, as the chat does.
  */
 export async function seededStore(): Promise<Store> {
   const state = seedState();
   const store = new MemoryStore();
   for (const person of state.salespeople) {
     await store.put("salespeople", person.id, { _id: person.id, ...person });
+    await store.put("accounts", person.id, {
+      _id: person.id,
+      id: person.id,
+      kind: "salesperson",
+      name: person.displayName,
+      owner_salesperson_id: person.id,
+    });
   }
   for (const product of state.products) {
     await store.put("products", product.id, { _id: product.id, ...product });
-  }
-  for (const price of state.pricing) {
-    await store.put("pricing", price.id, { _id: price.id, ...price });
   }
   for (const account of state.accounts) {
     await store.put("accounts", account.id, { _id: account.id, ...account });
