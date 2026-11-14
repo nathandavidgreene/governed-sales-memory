@@ -1,0 +1,79 @@
+/**
+ * Storage seam for the app.
+ *
+ * Everything that reads or writes data goes through the `Store` interface,
+ * so the in-memory implementation used by the skeleton can later be swapped
+ * for a database-backed one without changing any caller.
+ */
+
+/** A single stored record: plain JSON data keyed by string field names. */
+export type JsonRecord = Record<string, unknown>;
+
+/**
+ * A store over named collections of JSON records.
+ *
+ * Records are addressed by a caller-chosen string id inside a named
+ * collection (for example the "accounts" collection). Reads of a missing
+ * collection or id report "not there" instead of guessing a default.
+ */
+export interface Store {
+  /**
+   * Return the record stored under `id` in `collection`.
+   * Returns `undefined` when the collection or the id does not exist.
+   */
+  get(collection: string, id: string): Promise<JsonRecord | undefined>;
+
+  /**
+   * Store `record` under `id` in `collection`, replacing any record that
+   * was there before. The store keeps its own copy, so later edits to the
+   * caller's object do not leak into stored state.
+   */
+  put(collection: string, id: string, record: JsonRecord): Promise<void>;
+
+  /**
+   * Return every record in `collection`, in insertion order.
+   * Returns an empty list when the collection does not exist.
+   */
+  list(collection: string): Promise<JsonRecord[]>;
+}
+
+/**
+ * In-memory `Store` backed by plain maps.
+ *
+ * State lives only as long as the object does and is never shared between
+ * instances, which makes it safe for per-request use and for tests. It is
+ * the skeleton's stand-in until the database-backed store lands.
+ */
+export class MemoryStore implements Store {
+  /** Collections by name; each maps record ids to records. */
+  private readonly collections = new Map<string, Map<string, JsonRecord>>();
+
+  /** See `Store.get`. Returned records are copies, not live references. */
+  async get(collection: string, id: string): Promise<JsonRecord | undefined> {
+    const record = this.collections.get(collection)?.get(id);
+    return record === undefined ? undefined : { ...record };
+  }
+
+  /** See `Store.put`. */
+  async put(
+    collection: string,
+    id: string,
+    record: JsonRecord,
+  ): Promise<void> {
+    let bucket = this.collections.get(collection);
+    if (bucket === undefined) {
+      bucket = new Map<string, JsonRecord>();
+      this.collections.set(collection, bucket);
+    }
+    bucket.set(id, { ...record });
+  }
+
+  /** See `Store.list`. Returned records are copies, not live references. */
+  async list(collection: string): Promise<JsonRecord[]> {
+    const bucket = this.collections.get(collection);
+    if (bucket === undefined) {
+      return [];
+    }
+    return [...bucket.values()].map((record) => ({ ...record }));
+  }
+}

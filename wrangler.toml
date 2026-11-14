@@ -1,0 +1,6 @@
+# Cloudflare Worker configuration for the governed sales memory app.
+# No secrets live here; the database connection string is a Worker secret.
+name = "governed-sales-memory"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+compatibility_flags = ["nodejs_compat"]
