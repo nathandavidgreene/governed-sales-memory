@@ -52,6 +52,7 @@ import { demoPage } from "./page";
 import { searchRoute, withDatabaseSearch } from "./search-route";
 import { seededStore } from "./seed";
 import { SessionService } from "./session";
+import { createVoyageDocumentEmbedder } from "./voyage";
 import { MemoryStore, type Store } from "./store";
 
 /** The governed services, all over one store and one change log. */
@@ -70,11 +71,17 @@ interface Services {
  * Every service shares the store and the change log, so an action
  * taken through any of them lands in the same change log. The model
  * client is built from the environment and is present only when its
- * secret is set; without it the chat fails closed.
+ * secret is set; without it the chat fails closed. Memory text is
+ * embedded on write only when the Voyage key is set.
  */
 function buildServices(store: Store, env: WorkerEnv | undefined): Services {
   const log = new ChangeLog(store);
-  const memory = new MemoryService(store, log);
+  const voyageKey = env?.VOYAGE_API_KEY;
+  const embed =
+    typeof voyageKey === "string" && voyageKey !== ""
+      ? createVoyageDocumentEmbedder(voyageKey)
+      : undefined;
+  const memory = new MemoryService(store, log, embed);
   const sessions = new SessionService(store, log);
   const outbox = new Outbox(store);
   const chat = new ChatService(memory, sessions, store, createModelClient(env));

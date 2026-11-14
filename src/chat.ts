@@ -64,6 +64,9 @@ const MAX_TEXT_LENGTH = 4000;
 /** The collection accounts live in; matches the governed services. */
 const ACCOUNTS = "accounts";
 
+/** The collection products live in; list_products reads it. */
+const PRODUCTS = "products";
+
 /** The collection memories live in; matches the memory service. */
 const MEMORIES = "memories";
 
@@ -86,7 +89,9 @@ const SYSTEM_PROMPT =
   "tools return nothing relevant, say you have no record of it. Use " +
   "remember to save new facts the salesperson tells you, correct to fix " +
   "a saved memory, and forget only when the salesperson asks for a " +
-  "memory to be removed. Use propose to draft a change for approval; you " +
+  "memory to be removed. Use propose to draft a change for approval; " +
+  "when it involves pricing, call list_products first and price only from " +
+  "its rate labels, calling them sample prices. You " +
   "cannot approve anything — the salesperson approves with the Approve " +
   "button. A tool result of \"not found\" means the item or account is " +
   "not available to this salesperson; say so plainly and do not guess " +
@@ -102,6 +107,17 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "list_my_accounts",
       description: "List the salesperson's own client accounts (id, name, status).",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_products",
+      description:
+        "List the products on offer with their sample price wording (name, " +
+        "rate_label, sample_label). Read-only. Use these rate labels to price " +
+        "a proposal; they are sample prices.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -181,13 +197,19 @@ export const TOOLS: ToolDefinition[] = [
       name: "propose",
       description:
         "Draft a change for one of the salesperson's own accounts, such as a " +
-        "campaign proposal. It is stored as pending and does nothing until the " +
-        "salesperson approves it.",
+        "campaign proposal. Price it only from list_products rate labels and " +
+        "mark them as sample prices. It is stored as pending and does nothing " +
+        "until the salesperson approves it.",
       parameters: {
         type: "object",
         properties: {
           account_id: { type: "string", description: "The account id, from list_my_accounts." },
-          summary: { type: "string", description: "Exactly what would change, in plain words." },
+          summary: {
+            type: "string",
+            description:
+              "Exactly what would change, in plain words, including any products and " +
+              "their list_products rate labels (sample prices).",
+          },
         },
         required: ["account_id", "summary"],
         additionalProperties: false,
@@ -403,6 +425,12 @@ export class ChatService {
         }
         return { ok: true, accounts: await this.myAccounts(ownerId) };
       }
+      case "list_products": {
+        if (parseArgs(raw, []) === undefined) {
+          return INVALID;
+        }
+        return { ok: true, products: await this.products() };
+      }
       case "search_memories": {
         const args = parseArgs(raw, ["query"]);
         if (args === undefined) {
@@ -488,6 +516,34 @@ export class ChatService {
       });
     }
     return accounts;
+  }
+
+  /**
+   * List the products' sample price wording from the store, read-only:
+   * id, name (the channel when a product has no name), `rate_label`,
+   * and `sample_label`. Products without a rate label are left out, so
+   * the model is never handed a price it would have to guess.
+   */
+  private async products(): Promise<JsonRecord[]> {
+    const products: JsonRecord[] = [];
+    for (const raw of await this.store.list(PRODUCTS)) {
+      if (typeof raw.rate_label !== "string") {
+        continue;
+      }
+      const name =
+        typeof raw.name === "string"
+          ? raw.name
+          : typeof raw.channel === "string"
+            ? raw.channel
+            : null;
+      products.push({
+        id: raw._id ?? raw.id,
+        name,
+        rate_label: raw.rate_label,
+        sample_label: typeof raw.sample_label === "string" ? raw.sample_label : "sample price",
+      });
+    }
+    return products;
   }
 
   /**

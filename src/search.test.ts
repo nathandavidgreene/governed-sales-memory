@@ -380,6 +380,28 @@ describe("keyword fallback", () => {
     expect(hits).toEqual([]);
   });
 
+  /**
+   * A vector search that succeeds but finds nothing — as when the
+   * caller's memories were stored without a vector — falls back to the
+   * keyword search, which finds the memory by its words.
+   */
+  it("runs the keyword search when the vector path returns no hits", async () => {
+    const fake = new FakeMemories(ALL_DOCS);
+    fake.aggregate = (pipeline: Document[]) => {
+      fake.aggregateCalls.push(pipeline);
+      return { toArray: async () => [] };
+    };
+    const hits = await searchMemories(
+      SALESPERSON_1,
+      "Harbor",
+      5,
+      depsFor(fake, fixedEmbedder([1, 0, 0])),
+    );
+    expect(fake.aggregateCalls).toHaveLength(1);
+    expect(fake.findCalls).toHaveLength(1);
+    expect(hits.map((hit) => hit.id)).toEqual(["mem_harbor_cmo"]);
+  });
+
   /** A successful vector search never touches the keyword path. */
   it("does not run the keyword search when the vector path succeeds", async () => {
     const fake = new FakeMemories(ALL_DOCS);
