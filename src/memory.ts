@@ -50,6 +50,8 @@ export interface MemoryItem {
   history?: Correction[];
   /** False while the item is live; only `forget` sets it to true. */
   forgotten?: boolean;
+  /** The account the item is about, when it is about one. */
+  account_id?: string;
 }
 
 /** What a caller hands to `remember`; the service stamps the owner on it. */
@@ -87,6 +89,9 @@ const NOT_FOUND: Refusal = { ok: false, error: "not found" };
 
 /** The result of a recall: the item, or the generic refusal. */
 export type RecallResult = { ok: true; item: MemoryItem } | Refusal;
+
+/** The result of a remember-on-account attempt: the item, or the generic refusal. */
+export type RememberResult = { ok: true; item: MemoryItem } | Refusal;
 
 /** The result of a forget attempt: done, or the generic refusal. */
 export type ForgetResult = { ok: true } | Refusal;
@@ -165,6 +170,51 @@ export class MemoryService {
       "Memory item stored.",
     );
     return item;
+  }
+
+  /**
+   * Store an item about one account for `ownerSalespersonId`, stamped
+   * with `account_id`, and append a "remember" change log entry.
+   *
+   * The account must exist and belong to the salesperson — the same
+   * ownership rule `propose` applies. A missing account gets the
+   * generic refusal; someone else's account gets the generic refusal
+   * and a "refuse" change log entry, and nothing is stored either way.
+   */
+  async rememberOnAccount(
+    ownerSalespersonId: string,
+    accountId: string,
+    input: MemoryItemInput,
+  ): Promise<RememberResult> {
+    const account = await this.store.get(ACCOUNTS, accountId);
+    if (account === undefined || account.kind === "salesperson") {
+      return NOT_FOUND;
+    }
+    if (account.owner_salesperson_id !== ownerSalespersonId) {
+      await this.log.append(
+        ownerSalespersonId,
+        "refuse",
+        accountId,
+        "Remember refused: not the owner.",
+      );
+      return NOT_FOUND;
+    }
+    const item: MemoryItem = {
+      id: input.id ?? globalThis.crypto.randomUUID(),
+      owner_salesperson_id: ownerSalespersonId,
+      kind: input.kind,
+      text: input.text,
+      forgotten: false,
+      account_id: accountId,
+    };
+    await this.store.put(ITEMS, item.id, { _id: item.id, ...item });
+    await this.log.append(
+      ownerSalespersonId,
+      "remember",
+      item.id,
+      "Memory item stored.",
+    );
+    return { ok: true, item };
   }
 
   /**
@@ -282,7 +332,8 @@ export class MemoryService {
 
   /**
    * Propose a change for `ownerSalespersonId`: stored as a pending
-   * approval that changes nothing until `approve` is called on it.
+   * approval that changes nothing until `approve` is called on it,
+   * with a "propose" change log entry naming the approval id.
    * Generates an id when the caller does not supply one.
    *
    * When the change names an account, the account must exist and
@@ -323,6 +374,12 @@ export class MemoryService {
       _id: approval.id,
       ...approval,
     });
+    await this.log.append(
+      ownerSalespersonId,
+      "propose",
+      approval.id,
+      "Change proposed; waiting for approval.",
+    );
     return { ok: true, approval };
   }
 

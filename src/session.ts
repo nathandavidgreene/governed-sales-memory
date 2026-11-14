@@ -1,31 +1,28 @@
 /**
- * The session service: one salesperson's working session on one account.
+ * The session service: one salesperson's working session with the agent.
  *
- * A session remembers where the work got to — its current step and the
- * data gathered so far — so closing it and resuming it later lands on
- * exactly the same step with the same data, instead of starting over.
- * Sessions are owner-scoped like memory items: opening one checks that
- * the account belongs to the salesperson opening it, and only the
- * owner can move, close, or resume one. Every refusal is the one
- * generic refusal the memory service gives — the same for a session or
- * account that belongs to someone else and for one that does not exist
- * at all — and a cross-owner attempt is written to the change log as a
- * "refuse" entry. Steps are plain strings chosen by the caller; this
- * service stores whatever step it is given and never assumes a fixed
- * script.
+ * A session belongs to one owner and nothing else: it is not tied to an
+ * account and has no fixed steps. It holds the conversation history
+ * the agent replays on every turn, plus free-form data such as the ids
+ * of proposals raised in it, so closing it and resuming it later picks
+ * the conversation up exactly where it stopped. Only the owner can
+ * read, update, close, or resume a session. Every refusal is the one
+ * generic refusal the memory service gives — the same for a session
+ * owned by someone else and for one that does not exist at all — and a
+ * cross-owner attempt is written to the change log as a "refuse" entry.
  */
 
 import type { ChangeLog } from "./change-log";
+import type { ChatMessage } from "./model";
 import type { JsonRecord, Store } from "./store";
 
-/** One working session on one account, owned by one salesperson. */
+/** One working session, owned by one salesperson. */
 export interface Session {
   id: string;
   owner_salesperson_id: string;
-  accountId: string;
-  /** Where the work currently stands; a plain word set by the caller. */
-  step: string;
-  /** Data gathered so far, as plain JSON; survives close and resume. */
+  /** The conversation so far, in chat-completions message form. */
+  history: ChatMessage[];
+  /** Free-form data gathered so far, as plain JSON; survives close and resume. */
   data: JsonRecord;
   status: "open" | "closed";
   /** ISO 8601 timestamp of the last change to this session. */
@@ -35,7 +32,8 @@ export interface Session {
 /**
  * The result of a session action: the session, the generic refusal
  * ("not found" — covering both a missing session and one owned by
- * someone else), or a state refusal for the owner's own session.
+ * someone else, or an unknown salesperson on open), or a state refusal
+ * for the owner's own session.
  */
 export type SessionResult =
   | { ok: true; session: Session }
@@ -44,7 +42,7 @@ export type SessionResult =
 /** The collection sessions live in. */
 const SESSIONS = "sessions";
 
-/** The collection accounts live in; open checks ownership here. */
+/** The collection accounts live in; open checks the salesperson row here. */
 const ACCOUNTS = "accounts";
 
 /**
@@ -60,38 +58,28 @@ export class SessionService {
   ) {}
 
   /**
-   * Open a new session for `ownerSalespersonId` on `accountId`, at
-   * step "intake" with no data yet, and append a "session-open" change
-   * log entry. Generates the session id.
+   * Open a new, empty session for `ownerSalespersonId` and append a
+   * "session-open" change log entry. Generates the session id. The
+   * session names no account and starts with no history.
    *
-   * The account must exist and belong to the salesperson opening the
-   * session — nobody opens a session on someone else's account. A
-   * missing account gets the generic refusal; someone else's account
-   * gets the generic refusal and a "refuse" change log entry, and no
-   * session is stored either way.
+   * The owner must be a known salesperson: the accounts collection
+   * holds a `kind: "salesperson"` row keyed by their id. Anyone else
+   * gets the generic refusal and no session is stored, so an unknown
+   * caller cannot create sessions.
    */
-  async open(
-    ownerSalespersonId: string,
-    accountId: string,
-  ): Promise<SessionResult> {
-    const account = await this.store.get(ACCOUNTS, accountId);
-    if (account === undefined) {
-      return { ok: false, error: "not found" };
-    }
-    if (account.owner_salesperson_id !== ownerSalespersonId) {
-      await this.log.append(
-        ownerSalespersonId,
-        "refuse",
-        accountId,
-        "Session open refused: not the owner.",
-      );
+  async open(ownerSalespersonId: string): Promise<SessionResult> {
+    const person = await this.store.get(ACCOUNTS, ownerSalespersonId);
+    if (
+      person === undefined ||
+      person.kind !== "salesperson" ||
+      person.owner_salesperson_id !== ownerSalespersonId
+    ) {
       return { ok: false, error: "not found" };
     }
     const session: Session = {
       id: globalThis.crypto.randomUUID(),
       owner_salesperson_id: ownerSalespersonId,
-      accountId,
-      step: "intake",
+      history: [],
       data: {},
       status: "open",
       updatedAt: new Date().toISOString(),
@@ -121,19 +109,21 @@ export class SessionService {
   }
 
   /**
-   * Move a session to a new step, merging any given data into the data
-   * already gathered, and append a "session-step" change log entry.
-   * Owner only, and only while the session is open: anyone else gets
-   * the generic refusal with a "refuse" log entry, and a closed
-   * session fails closed as "not open" with nothing changed.
+   * Save a session's conversation history, merging any given data
+   * into the data already gathered. Owner only, and only while the
+   * session is open: anyone else gets the generic refusal with a
+   * "refuse" log entry, and a closed session fails closed as "not
+   * open" with nothing changed. Saving history is bookkeeping, not a
+   * governed memory change, so it writes no change log entry of its
+   * own; every tool action in the turn logs itself.
    */
-  async advance(
+  async saveHistory(
     sessionId: string,
     ownerSalespersonId: string,
-    step: string,
+    history: ChatMessage[],
     data?: JsonRecord,
   ): Promise<SessionResult> {
-    const loaded = await this.loadOwned(sessionId, ownerSalespersonId, "Advance");
+    const loaded = await this.loadOwned(sessionId, ownerSalespersonId, "Update");
     if (!loaded.ok) {
       return loaded;
     }
@@ -143,22 +133,16 @@ export class SessionService {
     }
     const next: Session = {
       ...session,
-      step,
+      history,
       data: data === undefined ? session.data : { ...session.data, ...data },
       updatedAt: new Date().toISOString(),
     };
     await this.store.put(SESSIONS, sessionId, { _id: sessionId, ...next });
-    await this.log.append(
-      ownerSalespersonId,
-      "session-step",
-      sessionId,
-      "Session advanced.",
-    );
     return { ok: true, session: next };
   }
 
   /**
-   * Close a session, keeping its step and data exactly as they are,
+   * Close a session, keeping its history and data exactly as they are,
    * and append a "session-close" change log entry. Owner only, and
    * only while the session is open; anyone else gets the generic
    * refusal with a "refuse" log entry and the session is left
@@ -192,8 +176,8 @@ export class SessionService {
   }
 
   /**
-   * Resume a closed session at its exact saved step, with its saved
-   * data, status back to "open", and append a "session-resume" change
+   * Resume a closed session with its saved history and data intact,
+   * status back to "open", and append a "session-resume" change
    * log entry. Owner only, and only from closed: a session that was
    * never closed fails closed as "not closed", and another owner's
    * session gets the generic refusal with a "refuse" log entry — it
@@ -244,6 +228,9 @@ export class SessionService {
     }
     const { _id: _key, ...rest } = raw;
     const session = rest as unknown as Session;
+    if (!Array.isArray(session.history)) {
+      session.history = [];
+    }
     if (session.owner_salesperson_id !== ownerSalespersonId) {
       await this.log.append(
         ownerSalespersonId,

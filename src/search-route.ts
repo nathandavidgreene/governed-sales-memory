@@ -36,6 +36,43 @@ export type SearchFn = (
 ) => Promise<MemoryHit[]>;
 
 /**
+ * Run `run` with a search function over the configured database, for
+ * the chat agent's search tool. The database client is opened only if
+ * a search actually runs, and is always closed when `run` finishes, so
+ * it never outlives the request. Without a connection string `run`
+ * gets `fallback` instead (the in-memory store's keyword search in
+ * local development).
+ */
+export async function withDatabaseSearch<T>(
+  env: WorkerEnv | undefined,
+  fallback: SearchFn,
+  run: (search: SearchFn) => Promise<T>,
+): Promise<T> {
+  const uri = env?.MONGODB_URI;
+  if (typeof uri !== "string" || uri === "") {
+    return run(fallback);
+  }
+  let client: MongoClient | undefined;
+  const search: SearchFn = (owner, query, k) => {
+    client ??= new MongoClient(uri, {
+      serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS,
+    });
+    const deps: SearchDeps = {
+      memories: client
+        .db(env?.MONGODB_DB ?? DEFAULT_DB_NAME)
+        .collection(MEMORIES_COLLECTION),
+      embed: createVoyageEmbedder(env?.VOYAGE_API_KEY ?? ""),
+    };
+    return searchMemories(owner, query, k, deps);
+  };
+  try {
+    return await run(search);
+  } finally {
+    await client?.close();
+  }
+}
+
+/**
  * Build a JSON response with the given body and status.
  * Kept local so this module does not depend on the router.
  */
