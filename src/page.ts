@@ -245,7 +245,6 @@ function openSession(owner) {
       mine.sessionId = result.body.session.id;
       mine.step = result.body.session.step;
       refresh();
-      sendChat("Let's start.");
     } else {
       pushMessage("system", "Could not open a session for " + owner + ".");
       refresh();
