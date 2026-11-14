@@ -136,6 +136,25 @@ describe("MemoryService forget", () => {
   });
 });
 
+describe("MemoryService remember storage", () => {
+  /**
+   * A remembered item is stored with forgotten false, so MongoDB
+   * {forgotten: false} search filters match it instead of missing it.
+   */
+  it("stores forgotten false on the memory document", async () => {
+    const store = new MemoryStore();
+    const log = new ChangeLog(store);
+    const service = new MemoryService(store, log);
+    await service.remember("sp-1", {
+      id: "item-unforgotten",
+      kind: "note",
+      text: "Sample note for the owner.",
+    });
+    const stored = await store.get("memories", "item-unforgotten");
+    expect(stored?.forgotten).toBe(false);
+  });
+});
+
 describe("MemoryService approve flow", () => {
   /**
    * A proposed change stays pending until its owner approves it;

@@ -48,6 +48,8 @@ export interface MemoryItem {
   correctedAt?: string;
   /** Every correction made to this item, oldest first. */
   history?: Correction[];
+  /** False while the item is live; only `forget` sets it to true. */
+  forgotten?: boolean;
 }
 
 /** What a caller hands to `remember`; the service stamps the owner on it. */
@@ -140,7 +142,9 @@ export class MemoryService {
   /**
    * Store an item for `ownerSalespersonId` and append a "remember"
    * change log entry. Generates an id when the caller does not supply
-   * one. The entry names the item id only — never its content.
+   * one. The entry names the item id only — never its content. The
+   * stored item carries `forgotten: false` so MongoDB
+   * `{forgotten: false}` search filters match it.
    */
   async remember(
     ownerSalespersonId: string,
@@ -151,6 +155,7 @@ export class MemoryService {
       owner_salesperson_id: ownerSalespersonId,
       kind: input.kind,
       text: input.text,
+      forgotten: false,
     };
     await this.store.put(ITEMS, item.id, { _id: item.id, ...item });
     await this.log.append(
