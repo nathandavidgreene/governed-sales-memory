@@ -542,11 +542,14 @@ describe("model seam fallback", () => {
   });
 
   /**
-   * A working model writes the free-form reply — and only that reply:
-   * the demo intents before it (intake, proposal) stayed scripted,
-   * proven by the model never being called until the free-form point.
+   * A working model writes replies only for messages that match no
+   * governed intent: the demo intents (intake with stakeholders, the
+   * confirmation that builds the proposal, the approval transition)
+   * stay scripted and never call it, while a no-intent message at any
+   * step — here "still waiting" at the proposal step — is answered by
+   * the model, with the pending approval still riding along.
    */
-  it("uses the model only for free-form replies, never for demo intents", async () => {
+  it("uses the model only for messages with no governed intent, never for demo intents", async () => {
     let calls = 0;
     const working: ModelClient = {
       complete: () => {
@@ -558,15 +561,96 @@ describe("model seam fallback", () => {
     const sessionId = await toProposalStep(chat);
     expect(calls).toBe(0);
     const approvalId = await currentApprovalId(chat, sessionId);
+    expect(calls).toBe(1);
     await memory.approve(SP1, approvalId);
     await chat.handle(SP1, sessionId, "thanks");
-    expect(calls).toBe(0);
+    expect(calls).toBe(1);
     const free = await chat.handle(SP1, sessionId, "What else should I know?");
     expect(free.ok).toBe(true);
     if (free.ok) {
       expect(free.reply).toBe("A short model-written answer.");
     }
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
+  });
+
+  /**
+   * At the intake step, a question that names no stakeholders is
+   * answered by the model when one is configured; the session stays
+   * at intake and nothing is written to memory.
+   */
+  it("answers an off-script question at intake with the model and holds the step", async () => {
+    const working: ModelClient = {
+      complete: () => Promise.resolve("Earth has one moon."),
+    };
+    const { chat, memory } = await freshChat(working);
+    const opened = await chat.openSession(SP1);
+    if (!opened.ok) {
+      throw new Error("open failed");
+    }
+    const reply = await chat.handle(
+      SP1,
+      opened.session.id,
+      "how many moons does earth have?",
+    );
+    expect(reply.ok).toBe(true);
+    if (reply.ok) {
+      expect(reply.reply).toBe("Earth has one moon.");
+      expect(reply.step).toBe("intake");
+    }
+    await expect(memory.recall(SP1, `stakeholders-${opened.session.id}`)).resolves.toEqual({
+      ok: false,
+      error: "not found",
+    });
+  });
+
+  /**
+   * At the stakeholders step, a message that is not a confirmation
+   * does not build a proposal: the model answers it (when configured)
+   * and the step holds with no pending approval.
+   */
+  it("holds at the stakeholders step for a non-confirmation message", async () => {
+    const working: ModelClient = {
+      complete: () => Promise.resolve("Earth has one moon."),
+    };
+    const { chat } = await freshChat(working);
+    const opened = await chat.openSession(SP1);
+    if (!opened.ok) {
+      throw new Error("open failed");
+    }
+    const sessionId = opened.session.id;
+    await chat.handle(SP1, sessionId, INTAKE);
+    const reply = await chat.handle(SP1, sessionId, "how many moons does earth have?");
+    expect(reply.ok).toBe(true);
+    if (reply.ok) {
+      expect(reply.reply).toBe("Earth has one moon.");
+      expect(reply.step).toBe("stakeholders");
+      expect(reply.pendingApproval).toBeUndefined();
+    }
+  });
+
+  /**
+   * With a failing model, an off-script question at intake gets the
+   * scripted re-prompt, exactly as if no model were configured.
+   */
+  it("falls back to the scripted re-prompt at intake when the model call fails", async () => {
+    const failing: ModelClient = {
+      complete: () => Promise.reject(new Error("model unavailable")),
+    };
+    const { chat } = await freshChat(failing);
+    const opened = await chat.openSession(SP1);
+    if (!opened.ok) {
+      throw new Error("open failed");
+    }
+    const reply = await chat.handle(
+      SP1,
+      opened.session.id,
+      "how many moons does earth have?",
+    );
+    expect(reply.ok).toBe(true);
+    if (reply.ok) {
+      expect(reply.reply).toContain("stakeholder");
+      expect(reply.step).toBe("intake");
+    }
   });
 
   /**
