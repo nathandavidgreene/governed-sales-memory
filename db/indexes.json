@@ -1,0 +1,110 @@
+{
+    "collections": {
+        "accounts": [
+            {
+                "key": {
+                    "_key": 1
+                },
+                "unique": true
+            },
+            {
+                "key": {
+                    "ownerId": 1
+                }
+            }
+        ],
+        "approvals": [
+            {
+                "key": {
+                    "_key": 1
+                },
+                "unique": true
+            },
+            {
+                "key": {
+                    "ownerId": 1
+                }
+            }
+        ],
+        "crm_outbox": [
+            {
+                "key": {
+                    "_key": 1
+                },
+                "unique": true
+            },
+            {
+                "key": {
+                    "approvalId": 1
+                },
+                "unique": true
+            }
+        ],
+        "memory_items": [
+            {
+                "key": {
+                    "_key": 1
+                },
+                "unique": true
+            },
+            {
+                "key": {
+                    "ownerId": 1
+                }
+            }
+        ],
+        "pricing": [
+            {
+                "key": {
+                    "_key": 1
+                },
+                "unique": true
+            }
+        ],
+        "products": [
+            {
+                "key": {
+                    "_key": 1
+                },
+                "unique": true
+            }
+        ],
+        "records": [
+            {
+                "key": {
+                    "_key": 1
+                },
+                "unique": true
+            },
+            {
+                "key": {
+                    "seq": 1
+                },
+                "unique": true
+            }
+        ],
+        "salespeople": [
+            {
+                "key": {
+                    "_key": 1
+                },
+                "unique": true
+            }
+        ],
+        "sessions": [
+            {
+                "key": {
+                    "_key": 1
+                },
+                "unique": true
+            },
+            {
+                "key": {
+                    "ownerId": 1
+                }
+            }
+        ]
+    },
+    "comment": "Indexes for every collection the app writes through the Store seam. _key is the id each record is stored under; unique _key indexes enforce the no-duplicates rule in the database. Applied by scripts/apply-indexes.mjs.",
+    "database": "sales_memory"
+}

@@ -9,8 +9,13 @@
  * - `GET /memory/:id?as=<requesterId>` recalls one item for its owner;
  *   anyone else gets the generic refusal with HTTP 403.
  * Any other route or method gets a JSON 404 rather than a guess.
+ *
+ * The `/memory` routes run on the store the environment selects (see
+ * `factory.ts`): the database when `MONGODB_URI` is set, in-memory
+ * otherwise. `/seed` always serves the sample seed from memory.
  */
 
+import { createStore, type WorkerEnv } from "./factory";
 import { MemoryService } from "./memory";
 import { RecordLog } from "./record";
 import { seededStore } from "./seed";
@@ -27,17 +32,17 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-/** The shared memory service behind the `/memory` routes, once built. */
+/** The shared in-memory service behind the `/memory` routes, once built. */
 let sharedMemory: MemoryService | undefined;
 
 /**
- * Return the memory service, building it on first use.
+ * Return the shared in-memory service, building it on first use.
  *
  * Module-level on purpose: a POST and a later GET must see the same
- * items, which a per-request store cannot do. This is the skeleton's
- * stand-in until the database-backed store lands.
+ * items, which a per-request in-memory store cannot do. This is the
+ * fallback for when no database is configured.
  */
-function memoryService(): MemoryService {
+function sharedMemoryService(): MemoryService {
   if (sharedMemory === undefined) {
     const store = new MemoryStore();
     sharedMemory = new MemoryService(store, new RecordLog(store));
@@ -46,18 +51,33 @@ function memoryService(): MemoryService {
 }
 
 /**
+ * Return the memory service for one request's environment.
+ *
+ * With `MONGODB_URI` set, a fresh service is built over the database
+ * store, so its state is the database's and nothing is shared between
+ * requests. Without it, the shared in-memory service answers.
+ */
+function memoryService(env: WorkerEnv | undefined): MemoryService {
+  if (typeof env?.MONGODB_URI === "string" && env.MONGODB_URI !== "") {
+    const store = createStore(env);
+    return new MemoryService(store, new RecordLog(store));
+  }
+  return sharedMemoryService();
+}
+
+/**
  * The Worker handler.
  *
  * Builds a fresh seeded store for each `/seed` request, so no state is
- * shared between requests there; `/memory` uses the shared service.
- * The fetch method is the Worker's whole surface.
+ * shared between requests there; `/memory` uses the service the
+ * environment selects. The fetch method is the Worker's whole surface.
  */
 const worker = {
   /**
    * Route one request to its handler, or a JSON 404.
    * Never throws for an unknown route; unknown means refused, not guessed.
    */
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env?: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
       return jsonResponse({ ok: true });
@@ -72,11 +92,11 @@ const worker = {
       });
     }
     if (request.method === "POST" && url.pathname === "/memory") {
-      return storeMemoryItem(request);
+      return storeMemoryItem(request, env);
     }
     const recallMatch = /^\/memory\/([^/]+)$/.exec(url.pathname);
     if (request.method === "GET" && recallMatch !== null) {
-      return recallMemoryItem(url, recallMatch[1]);
+      return recallMemoryItem(url, recallMatch[1], env);
     }
     return jsonResponse({ error: "not found" }, 404);
   },
@@ -87,7 +107,10 @@ const worker = {
  * Fails closed with 400 when the body is not JSON or a required field
  * (`ownerId`, `kind`, `text`) is missing; an omitted `id` is generated.
  */
-async function storeMemoryItem(request: Request): Promise<Response> {
+async function storeMemoryItem(
+  request: Request,
+  env: WorkerEnv | undefined,
+): Promise<Response> {
   let body: { ownerId?: unknown; id?: unknown; kind?: unknown; text?: unknown };
   try {
     body = (await request.json()) as typeof body;
@@ -101,7 +124,7 @@ async function storeMemoryItem(request: Request): Promise<Response> {
   ) {
     return jsonResponse({ ok: false, error: "missing fields" }, 400);
   }
-  const item = await memoryService().remember(body.ownerId, {
+  const item = await memoryService(env).remember(body.ownerId, {
     id: typeof body.id === "string" ? body.id : undefined,
     kind: body.kind,
     text: body.text,
@@ -118,12 +141,13 @@ async function storeMemoryItem(request: Request): Promise<Response> {
 async function recallMemoryItem(
   url: URL,
   rawId: string,
+  env: WorkerEnv | undefined,
 ): Promise<Response> {
   const requesterId = url.searchParams.get("as");
   if (requesterId === null || requesterId === "") {
     return jsonResponse({ ok: false, error: "missing requester" }, 400);
   }
-  const result = await memoryService().recall(
+  const result = await memoryService(env).recall(
     requesterId,
     decodeURIComponent(rawId),
   );
