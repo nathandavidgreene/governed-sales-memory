@@ -1,16 +1,34 @@
 /**
- * The memory service: governed remember, recall, forget, and approve.
+ * The memory service: governed remember, recall, correct, forget, and
+ * approve.
  *
  * Items live in the "memory_items" collection and belong to exactly one
  * owner. The read rule is the point of the service: only the owner can
  * recall an item. A read by anyone else is refused with a generic answer
  * that leaks nothing about the item — and the refusal itself is written
- * to the record log, so the attempt is provable later. Every governed
- * action here appends a record entry through the `RecordLog`.
+ * to the record log, so the attempt is provable later. Correcting an
+ * item follows the same rule and keeps the previous value in the item's
+ * own history. Every governed action here appends a record entry
+ * through the `RecordLog`, and approving a proposal also hands it to
+ * the outbox (see `Outbox`, the stand-in for a CRM).
  */
 
+import { Outbox } from "./outbox";
 import type { RecordLog } from "./record";
 import type { Store } from "./store";
+
+/**
+ * One correction made to a memory item: which field changed and what it
+ * held before. The previous value stays on the item itself, so the
+ * item carries its own history; the record log names the field only.
+ */
+export interface Correction {
+  field: string;
+  /** The value the field held before this correction. */
+  previous: unknown;
+  /** ISO 8601 timestamp of when the correction was made. */
+  at: string;
+}
 
 /** A stored memory item. `text` is the content only the owner may read. */
 export interface MemoryItem {
@@ -19,6 +37,10 @@ export interface MemoryItem {
   /** Plain-word category, for example "note" or "preference". */
   kind: string;
   text: string;
+  /** ISO 8601 timestamp of the most recent correction, once corrected. */
+  correctedAt?: string;
+  /** Every correction made to this item, oldest first. */
+  history?: Correction[];
 }
 
 /** What a caller hands to `remember`; the service stamps the owner on it. */
@@ -34,6 +56,8 @@ export interface Approval {
   ownerId: string;
   /** Plain-language description of exactly what would change. */
   description: string;
+  /** The account the change is about, when it is about one. */
+  accountId?: string;
   status: "pending" | "approved";
   /** Who approved it, once approved. */
   approvedBy?: string;
@@ -54,6 +78,11 @@ export type ApproveResult =
   | { ok: true; approval: Approval }
   | { ok: false; error: "unknown approval" | "already decided" };
 
+/** The result of a correct attempt: the item, or a fail-closed error. */
+export type CorrectResult =
+  | { ok: true; item: MemoryItem }
+  | { ok: false; error: "not yours" | "not found" | "not correctable" };
+
 /** The collection memory items live in. */
 const ITEMS = "memory_items";
 
@@ -66,11 +95,16 @@ const APPROVALS = "approvals";
  * can be swapped without changing this service.
  */
 export class MemoryService {
+  /** The outbox approvals are handed to; built over the same store. */
+  private readonly outbox: Outbox;
+
   /** Wrap the given store and record log; the service holds no state. */
   constructor(
     private readonly store: Store,
     private readonly log: RecordLog,
-  ) {}
+  ) {
+    this.outbox = new Outbox(store);
+  }
 
   /**
    * Store an item for `ownerId` and append a "remember" record entry.
@@ -148,11 +182,13 @@ export class MemoryService {
   /**
    * Propose a change for `ownerId`: stored as a pending approval that
    * changes nothing until `approve` is called on it. Generates an id
-   * when the caller does not supply one.
+   * when the caller does not supply one. A proposal may name the
+   * account it is about; that account id rides along to the outbox
+   * entry when the proposal is approved.
    */
   async propose(
     ownerId: string,
-    change: { id?: string; description: string },
+    change: { id?: string; description: string; accountId?: string },
   ): Promise<Approval> {
     const approval: Approval = {
       id: change.id ?? globalThis.crypto.randomUUID(),
@@ -160,6 +196,9 @@ export class MemoryService {
       description: change.description,
       status: "pending",
     };
+    if (change.accountId !== undefined) {
+      approval.accountId = change.accountId;
+    }
     await this.store.put(APPROVALS, approval.id, { ...approval });
     return approval;
   }
@@ -174,10 +213,13 @@ export class MemoryService {
   }
 
   /**
-   * Approve a pending change and append an "approve" record entry
-   * naming who decided. Fails closed: an unknown id returns "unknown
-   * approval", and an approval that was already decided returns
-   * "already decided" — one approval covers one decision, once.
+   * Approve a pending change, append an "approve" record entry naming
+   * who decided, and write the change to the outbox — the hand-off
+   * point that stands in for a CRM. Fails closed: an unknown id returns
+   * "unknown approval", and an approval that was already decided
+   * returns "already decided" — one approval covers one decision, once,
+   * and the outbox write is idempotent, so a decided approval can never
+   * produce a second outbox entry.
    */
   async approve(
     approverId: string,
@@ -202,6 +244,62 @@ export class MemoryService {
       approvalId,
       "Proposed change approved.",
     );
+    await this.outbox.writeOnApprove(decided);
     return { ok: true, approval: decided };
+  }
+
+  /**
+   * Correct one field of one item — owner only.
+   * The new value replaces the field; the value it held goes into the
+   * item's `history`, and the item is stamped with `correctedAt`. The
+   * "correct" record entry names the field only — never the old or new
+   * value — so the log proves a correction happened without carrying
+   * content. The identity fields (`id`, `ownerId`) and the history
+   * itself are not correctable and fail closed as "not correctable".
+   * A non-owner attempt is refused the generic way, logged as "refuse",
+   * and the item is left untouched; a missing or forgotten item fails
+   * closed as "not found".
+   */
+  async correct(
+    requesterId: string,
+    itemId: string,
+    field: string,
+    value: unknown,
+  ): Promise<CorrectResult> {
+    const raw = await this.store.get(ITEMS, itemId);
+    if (raw === undefined || raw.forgotten === true) {
+      return { ok: false, error: "not found" };
+    }
+    const item = raw as unknown as MemoryItem & Record<string, unknown>;
+    if (item.ownerId !== requesterId) {
+      await this.log.append(
+        requesterId,
+        "refuse",
+        itemId,
+        "Correct refused: not the owner.",
+      );
+      return { ok: false, error: "not yours" };
+    }
+    if (field === "id" || field === "ownerId" || field === "history") {
+      return { ok: false, error: "not correctable" };
+    }
+    const at = new Date().toISOString();
+    const corrected: MemoryItem & Record<string, unknown> = {
+      ...item,
+      [field]: value,
+      correctedAt: at,
+      history: [
+        ...(item.history ?? []),
+        { field, previous: item[field], at },
+      ],
+    };
+    await this.store.put(ITEMS, itemId, { ...corrected });
+    await this.log.append(
+      requesterId,
+      "correct",
+      itemId,
+      `Field "${field}" corrected.`,
+    );
+    return { ok: true, item: corrected };
   }
 }
