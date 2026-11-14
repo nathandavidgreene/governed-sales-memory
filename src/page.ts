@@ -78,6 +78,7 @@ export const demoPage = `<!doctype html>
       <span id="sessionStatus">Opening session…</span>
       <button class="quiet" id="closeBtn" type="button">Close session</button>
       <button class="quiet" id="resumeBtn" type="button" disabled>Resume session</button>
+      <button class="quiet" id="clearBtn" type="button" disabled>Clear chat</button>
     </div>
   </section>
   <aside>
@@ -155,6 +156,7 @@ function renderSession() {
   el("sendBtn").disabled = !mine.sessionId || mine.closed;
   el("closeBtn").disabled = !mine.sessionId || mine.closed;
   el("resumeBtn").disabled = !mine.sessionId || !mine.closed;
+  el("clearBtn").disabled = !mine.sessionId;
 }
 
 function renderApproval() {
@@ -309,6 +311,20 @@ el("resumeBtn").addEventListener("click", function () {
     }
     refresh();
   });
+});
+
+el("clearBtn").addEventListener("click", function () {
+  var owner = state.owner;
+  var mine = current();
+  var startFresh = function () {
+    state.per[owner] = { sessionId: null, step: "", closed: false, pending: null, messages: [] };
+    openSession(owner);
+  };
+  if (mine.sessionId && !mine.closed) {
+    api("/session/" + encodeURIComponent(mine.sessionId) + "/close?as=" + encodeURIComponent(owner), { method: "POST" }).then(startFresh, startFresh);
+  } else {
+    startFresh();
+  }
 });
 
 openSession("acct_salesperson");
