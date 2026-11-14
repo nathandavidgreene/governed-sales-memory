@@ -47,17 +47,20 @@ describe("seed data", () => {
   });
 
   /**
-   * Every seeded account carries an ownerId that names one of the seeded
-   * salespeople — the ownership shape the no-leak proof later relies on.
+   * Every seeded account carries an owner_salesperson_id that names one
+   * of the seeded salespeople — the ownership shape the no-leak proof
+   * later relies on.
    */
-  it("gives every account an ownerId matching a salesperson", () => {
+  it("gives every account an owner_salesperson_id matching a salesperson", () => {
     const state = seedState();
-    const ownerIds = new Set(state.salespeople.map((person) => person.id));
+    const salespersonIds = new Set(state.salespeople.map((person) => person.id));
     expect(state.accounts.length).toBeGreaterThan(0);
     for (const account of state.accounts) {
-      expect(ownerIds.has(account.ownerId)).toBe(true);
+      expect(salespersonIds.has(account.owner_salesperson_id)).toBe(true);
     }
-    const owners = new Set(state.accounts.map((account) => account.ownerId));
-    expect(owners).toEqual(ownerIds);
+    const owners = new Set(
+      state.accounts.map((account) => account.owner_salesperson_id),
+    );
+    expect(owners).toEqual(salespersonIds);
   });
 });

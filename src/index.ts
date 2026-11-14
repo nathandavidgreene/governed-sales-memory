@@ -1,14 +1,25 @@
 /**
  * Worker entry point for the governed sales memory app.
  *
- * The skeleton answers two routes and refuses everything else:
+ * Routes:
  * - `GET /health` reports that the Worker is up.
  * - `GET /seed` returns the sample seed state, read back out of a
  *   per-request in-memory store so the storage seam is exercised.
- * Any other route or method gets a JSON 404 rather than a guess.
+ * - `POST /memory?as=<salespersonId>` stores a memory item for its owner.
+ * - `GET /memory/:id?as=<requesterId>` recalls one item for its owner;
+ *   anyone else — and anyone asking for an item that does not exist —
+ *   gets one identical generic refusal with HTTP 404.
+ *
+ * The caller's identity comes only from the `?as=` query parameter,
+ * never from the request body. Malformed input is answered with a JSON
+ * 400, never a thrown 500. Any other route or method gets a JSON 404
+ * rather than a guess.
  */
 
+import { ChangeLog } from "./change-log";
+import { MemoryService } from "./memory";
 import { seededStore } from "./seed";
+import { MemoryStore } from "./store";
 
 /**
  * Build a JSON response with the given body and HTTP status.
@@ -21,16 +32,34 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/** The shared memory service behind the `/memory` routes, once built. */
+let sharedMemory: MemoryService | undefined;
+
+/**
+ * Return the memory service, building it on first use.
+ *
+ * Module-level on purpose: a POST and a later GET must see the same
+ * items, which a per-request store cannot do. This is the skeleton's
+ * stand-in until the database-backed store lands.
+ */
+function memoryService(): MemoryService {
+  if (sharedMemory === undefined) {
+    const store = new MemoryStore();
+    sharedMemory = new MemoryService(store, new ChangeLog(store));
+  }
+  return sharedMemory;
+}
+
 /**
  * The Worker handler.
  *
  * Builds a fresh seeded store for each `/seed` request, so no state is
- * shared between requests. The fetch method is the whole surface of the
- * skeleton; feature routes arrive in later pull requests.
+ * shared between requests there; `/memory` uses the shared service.
+ * The fetch method is the Worker's whole surface.
  */
 const worker = {
   /**
-   * Route one request: `/health`, `/seed`, or a JSON 404.
+   * Route one request to its handler, or a JSON 404.
    * Never throws for an unknown route; unknown means refused, not guessed.
    */
   async fetch(request: Request): Promise<Response> {
@@ -47,8 +76,76 @@ const worker = {
         accounts: await store.list("accounts"),
       });
     }
+    if (request.method === "POST" && url.pathname === "/memory") {
+      return storeMemoryItem(request, url);
+    }
+    const recallMatch = /^\/memory\/([^/]+)$/.exec(url.pathname);
+    if (request.method === "GET" && recallMatch !== null) {
+      return recallMemoryItem(url, recallMatch[1]);
+    }
     return jsonResponse({ error: "not found" }, 404);
   },
 };
+
+/**
+ * Handle `POST /memory?as=<salespersonId>`: store one item for its owner.
+ * The owner is the `?as=` caller — an owner field in the body is never
+ * trusted and is ignored. Fails closed with a JSON 400 when `as` is
+ * missing, the body is not JSON, or a required field (`kind`, `text`)
+ * is missing; an omitted `id` is generated.
+ */
+async function storeMemoryItem(
+  request: Request,
+  url: URL,
+): Promise<Response> {
+  const ownerSalespersonId = url.searchParams.get("as");
+  if (ownerSalespersonId === null || ownerSalespersonId === "") {
+    return jsonResponse({ ok: false, error: "missing requester" }, 400);
+  }
+  let body: { id?: unknown; kind?: unknown; text?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return jsonResponse({ ok: false, error: "invalid body" }, 400);
+  }
+  if (typeof body.kind !== "string" || typeof body.text !== "string") {
+    return jsonResponse({ ok: false, error: "missing fields" }, 400);
+  }
+  const item = await memoryService().remember(ownerSalespersonId, {
+    id: typeof body.id === "string" ? body.id : undefined,
+    kind: body.kind,
+    text: body.text,
+  });
+  return jsonResponse({ ok: true, item }, 201);
+}
+
+/**
+ * Handle `GET /memory/:id?as=<requesterId>`: recall one item.
+ * The service's read rule decides; this handler only maps its answer
+ * to HTTP — 200 for the owner, and one identical 404 refusal for both
+ * a cross-owner read and an item that does not exist, so the two are
+ * indistinguishable. A missing requester id or a malformed id in the
+ * URL is a JSON 400.
+ */
+async function recallMemoryItem(
+  url: URL,
+  rawId: string,
+): Promise<Response> {
+  const requesterId = url.searchParams.get("as");
+  if (requesterId === null || requesterId === "") {
+    return jsonResponse({ ok: false, error: "missing requester" }, 400);
+  }
+  let itemId: string;
+  try {
+    itemId = decodeURIComponent(rawId);
+  } catch {
+    return jsonResponse({ ok: false, error: "malformed id" }, 400);
+  }
+  const result = await memoryService().recall(requesterId, itemId);
+  if (!result.ok) {
+    return jsonResponse(result, 404);
+  }
+  return jsonResponse(result);
+}
 
 export default worker;

@@ -11,10 +11,13 @@ describe("MemoryStore", () => {
   /** A record put into a collection comes back out by id, unchanged. */
   it("returns a record that was put, by collection and id", async () => {
     const store = new MemoryStore();
-    await store.put("accounts", "a-1", { id: "a-1", ownerId: "sp-1" });
+    await store.put("accounts", "a-1", {
+      id: "a-1",
+      owner_salesperson_id: "sp-1",
+    });
     await expect(store.get("accounts", "a-1")).resolves.toEqual({
       id: "a-1",
-      ownerId: "sp-1",
+      owner_salesperson_id: "sp-1",
     });
   });
 
@@ -40,5 +43,32 @@ describe("MemoryStore", () => {
   it("returns an empty list for an unknown collection", async () => {
     const store = new MemoryStore();
     await expect(store.list("nope")).resolves.toEqual([]);
+  });
+
+  /** An inserted record comes back by id, exactly as inserted. */
+  it("returns a record that was inserted, by collection and id", async () => {
+    const store = new MemoryStore();
+    await store.insert("change_log", "1", { _id: "1", action: "remember" });
+    await expect(store.get("change_log", "1")).resolves.toEqual({
+      _id: "1",
+      action: "remember",
+    });
+  });
+
+  /**
+   * Insert is insert-only: a second insert under a taken id rejects
+   * and leaves the original record untouched — the guarantee the
+   * change log's append relies on instead of read-then-write.
+   */
+  it("rejects an insert under a taken id and keeps the original", async () => {
+    const store = new MemoryStore();
+    await store.insert("change_log", "1", { _id: "1", action: "remember" });
+    await expect(
+      store.insert("change_log", "1", { _id: "1", action: "forget" }),
+    ).rejects.toThrow();
+    await expect(store.get("change_log", "1")).resolves.toEqual({
+      _id: "1",
+      action: "remember",
+    });
   });
 });
