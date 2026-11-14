@@ -110,6 +110,17 @@ export class SessionService {
   }
 
   /**
+   * Read one session back — for its owner only.
+   * Uses the same ownership check as every other action: a missing
+   * session fails closed as "not found", and another owner's session
+   * appends a "refuse" record entry and returns "not yours", revealing
+   * nothing about the session. Reading never changes the session.
+   */
+  async get(sessionId: string, ownerId: string): Promise<SessionResult> {
+    return this.loadOwned(sessionId, ownerId, "Read");
+  }
+
+  /**
    * Move a session to a new step, merging any given data into the data
    * already gathered, and append a "session-step" change log entry.
    * Owner only, and only while the session is open: anyone else gets

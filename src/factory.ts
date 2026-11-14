@@ -20,8 +20,8 @@ export const DEFAULT_DB_NAME = "sales_memory";
 
 /**
  * The Worker's environment bindings this app reads.
- * `MONGODB_URI` is a secret and is never set in config files;
- * `MONGODB_DB` is a plain variable naming the database;
+ * `MONGODB_URI` and `MODEL_API_KEY` are secrets and are never set in
+ * config files; `MONGODB_DB` is a plain variable naming the database;
  * `ALLOW_IN_MEMORY_STORE` is the local-dev escape hatch described in
  * the module docs.
  */
@@ -30,6 +30,12 @@ export interface WorkerEnv {
   MONGODB_URI?: string;
   /** Database name; defaults to `DEFAULT_DB_NAME` when unset. */
   MONGODB_DB?: string;
+  /**
+   * API key for the model the chat may use for free-form replies,
+   * from the secret store. Unset means scripted replies only; the
+   * governed intents never depend on it (see `model.ts`).
+   */
+  MODEL_API_KEY?: string;
   /**
    * Exactly "true" allows the in-memory store when no connection
    * string is set. Any other value — "TRUE", "1", unset — does not.
