@@ -164,12 +164,11 @@ async function storeMemoryItem(
   if (typeof body.kind !== "string" || typeof body.text !== "string") {
     return jsonResponse({ ok: false, error: "missing fields" }, 400);
   }
+  const kind = body.kind;
+  const text = body.text;
+  const id = typeof body.id === "string" ? body.id : undefined;
   const item = await withMemoryService(env, (service) =>
-    service.remember(ownerSalespersonId, {
-      id: typeof body.id === "string" ? body.id : undefined,
-      kind: body.kind,
-      text: body.text,
-    }),
+    service.remember(ownerSalespersonId, { id, kind, text }),
   );
   return jsonResponse({ ok: true, item }, 201);
 }

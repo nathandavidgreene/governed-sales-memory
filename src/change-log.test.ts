@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ChangeLog } from "./change-log";
-import { MemoryStore } from "./store";
+import { MemoryStore, type JsonRecord, type Store } from "./store";
 
 /**
  * Build a log over a fresh in-memory store and append three entries.
@@ -103,5 +103,32 @@ describe("ChangeLog", () => {
       second.append("sp-2", "approve", "chg-2", "Proposed change approved."),
     ]);
     await expect(first.verify()).resolves.toEqual({ ok: true, count: 4 });
+  });
+
+  /**
+   * Appends chain onto the store's tail lookup, not a full listing:
+   * with a store that counts its `list` calls, an append after the
+   * first entry must not list the collection at all. This is what
+   * keeps a long log's append cheap against the database.
+   */
+  it("appends via the tail lookup without listing the log", async () => {
+    const inner = new MemoryStore();
+    let listCalls = 0;
+    const counting: Store = {
+      get: (collection, id) => inner.get(collection, id),
+      put: (collection, id, record) => inner.put(collection, id, record),
+      insert: (collection, id, record) =>
+        inner.insert(collection, id, record),
+      list: (collection): Promise<JsonRecord[]> => {
+        listCalls += 1;
+        return inner.list(collection);
+      },
+      last: (collection) => inner.last(collection),
+    };
+    const log = new ChangeLog(counting);
+    await log.append("sp-1", "remember", "item-1", "Memory item stored.");
+    await log.append("sp-1", "approve", "chg-1", "Proposed change approved.");
+    expect(listCalls).toBe(0);
+    await expect(log.verify()).resolves.toEqual({ ok: true, count: 2 });
   });
 });

@@ -36,7 +36,10 @@ const DUPLICATE_KEY_CODE = 11000;
  * by that id, so the stored key always matches the address it was
  * written to.
  */
-export function toStoredDoc(id: string, record: JsonRecord): Document {
+export function toStoredDoc(
+  id: string,
+  record: JsonRecord,
+): JsonRecord & { _id: string } {
   return { ...record, _id: id };
 }
 
@@ -107,10 +110,20 @@ export class AtlasStore implements Store {
     }
   }
 
+  /**
+   * The named collection, typed with this app's record shape so `_id`
+   * filters and documents are plain JSON values rather than the
+   * driver's default document typing.
+   */
+  private async collection(name: string) {
+    const db = await this.db();
+    return db.collection<JsonRecord & { _id: string }>(name);
+  }
+
   /** See `Store.get`. Missing collection or id returns `undefined`. */
   async get(collection: string, id: string): Promise<JsonRecord | undefined> {
-    const db = await this.db();
-    const doc = await db.collection(collection).findOne({ _id: id });
+    const coll = await this.collection(collection);
+    const doc = await coll.findOne({ _id: id });
     return doc === null ? undefined : fromStoredDoc(doc);
   }
 
@@ -120,10 +133,10 @@ export class AtlasStore implements Store {
     id: string,
     record: JsonRecord,
   ): Promise<void> {
-    const db = await this.db();
-    await db
-      .collection(collection)
-      .replaceOne({ _id: id }, toStoredDoc(id, record), { upsert: true });
+    const coll = await this.collection(collection);
+    await coll.replaceOne({ _id: id }, toStoredDoc(id, record), {
+      upsert: true,
+    });
   }
 
   /**
@@ -138,9 +151,9 @@ export class AtlasStore implements Store {
     id: string,
     record: JsonRecord,
   ): Promise<void> {
-    const db = await this.db();
+    const coll = await this.collection(collection);
     try {
-      await db.collection(collection).insertOne(toStoredDoc(id, record));
+      await coll.insertOne(toStoredDoc(id, record));
     } catch (error) {
       if (
         typeof error === "object" &&
@@ -161,8 +174,8 @@ export class AtlasStore implements Store {
    * (the collection's natural order); a missing collection reads empty.
    */
   async list(collection: string): Promise<JsonRecord[]> {
-    const db = await this.db();
-    const docs = await db.collection(collection).find({}).toArray();
+    const coll = await this.collection(collection);
+    const docs = await coll.find({}).toArray();
     return docs.map((doc) => fromStoredDoc(doc));
   }
 
@@ -173,9 +186,8 @@ export class AtlasStore implements Store {
    * collection is empty or does not exist.
    */
   async last(collection: string): Promise<JsonRecord | undefined> {
-    const db = await this.db();
-    const docs = await db
-      .collection(collection)
+    const coll = await this.collection(collection);
+    const docs = await coll
       .find({})
       .sort({ $natural: -1 })
       .limit(1)
