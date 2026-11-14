@@ -49,6 +49,7 @@ import { MemoryService } from "./memory";
 import { createModelClient } from "./model";
 import { Outbox } from "./outbox";
 import { demoPage } from "./page";
+import { searchRoute } from "./search-route";
 import { seededStore } from "./seed";
 import { SessionService } from "./session";
 import { MemoryStore, type Store } from "./store";
@@ -214,6 +215,9 @@ async function route(
   }
   if (request.method === "POST" && url.pathname === "/session") {
     return openSession(url, env);
+  }
+  if (request.method === "GET" && url.pathname === "/search") {
+    return searchRoute(url, env);
   }
   if (request.method === "POST" && url.pathname === "/chat") {
     return chatMessage(request, url, env);

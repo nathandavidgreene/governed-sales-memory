@@ -41,6 +41,8 @@ export interface WorkerEnv {
    * string is set. Any other value — "TRUE", "1", unset — does not.
    */
   ALLOW_IN_MEMORY_STORE?: string;
+  /** Voyage API key for query embeddings; unset means keyword search only. */
+  VOYAGE_API_KEY?: string;
 }
 
 /**
