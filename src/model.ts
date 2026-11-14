@@ -3,7 +3,8 @@
  *
  * The chat's governed intents — intake, correct, forget, propose, and
  * every refusal — are scripted and deterministic, and never touch this
- * seam. Only free-form replies may go to a model, and only when one is
+ * seam. Only replies to messages that match no governed intent may go
+ * to a model, at any step of the workflow, and only when one is
  * configured: `createModelClient` returns a client when the
  * `MODEL_API_KEY` secret is present and `undefined` otherwise, and the
  * chat falls back to its scripted replies whenever there is no client

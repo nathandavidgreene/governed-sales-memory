@@ -4,10 +4,11 @@
  * The demo-critical intents — intake, correct, forget, propose, and
  * every refusal — are scripted and deterministic: replies are chosen
  * by plain keyword and intent matching, so the demo behaves the same
- * way on every run. Only free-form replies, after the demo path is
- * complete, may come from a model (see `model.ts`); when no model is
+ * way on every run. A message that matches no governed intent may be
+ * answered by a model at any step (see `model.ts`); when no model is
  * configured, or the model call fails, the scripted reply answers
- * instead, so a model can never break the demo.
+ * instead, so a model can never break the demo — and a model answer
+ * never writes memory, proposes, or approves anything itself.
  *
  * The chat works on whatever the store holds: accounts are read from
  * the store (the seeded database when one is connected), never from a
@@ -334,7 +335,8 @@ const NAME_STOPWORDS: ReadonlySet<string> = new Set(["sample", "account"]);
  * Holds no state of its own: sessions, memory items, approvals, and the
  * change log all live in the store behind the services it wraps, so a
  * fresh instance per request behaves exactly like a shared one. The
- * model client is optional and is consulted only for free-form replies.
+ * model client is optional and is consulted only for messages that
+ * match no governed intent.
  */
 export class ChatService {
   /** Wrap the memory service, the session service, and their store. */
@@ -625,8 +627,10 @@ export class ChatService {
    * intent: intake parses the stakeholders (and any budget figure)
    * out of the message and writes them as memories, confirmation
    * builds the proposal from the stakeholder note on record, and the
-   * proposal step watches for the approval the card performs. Returns
-   * null at the final step, where the conversation is free-form.
+   * proposal step watches for the approval the card performs. A
+   * message that advances nothing at the current step is answered
+   * conversationally (see `conversational`). Returns null at the
+   * final step, where the conversation is free-form.
    */
   private async handleStep(
     ownerId: string,
@@ -637,8 +641,10 @@ export class ChatService {
     if (session.step === "intake") {
       const stakeholders = parseStakeholders(text);
       if (stakeholders.length === 0) {
-        return this.withPending(
+        return this.conversational(
           session,
+          account,
+          text,
           `Let's work on ${account.name}. To draft the stakeholder ` +
             "note I need the intake details from you: who the " +
             'stakeholders are and the roles they hold — for example ' +
@@ -687,6 +693,25 @@ export class ChatService {
       );
     }
     if (session.step === "stakeholders") {
+      // Only a confirmation (or a message carrying the budget figure)
+      // advances to the proposal. Anything else — a question, a
+      // comment — is answered conversationally and the step holds, so
+      // small talk can never trigger a proposal by accident.
+      const confirms =
+        parseBudgetFigure(text) !== undefined ||
+        /\b(looks good|ok|okay|yes|proceed|go ahead|confirm|confirmed|good|fine|sure|do it)\b/i.test(
+          text,
+        );
+      if (!confirms) {
+        return this.conversational(
+          session,
+          account,
+          text,
+          'Whenever you\'re ready, say "looks good" and I\'ll put ' +
+            "together the campaign proposal — or tell me a correction " +
+            "to the stakeholder note first.",
+        );
+      }
       const budgetPatch = await this.rememberBudget(
         ownerId,
         session,
@@ -747,8 +772,10 @@ export class ChatService {
             "back here, with the same data.",
         );
       }
-      return this.withPending(
+      return this.conversational(
         session,
+        account,
+        text,
         "That proposal is still waiting for your approval — use the " +
           "Approve button in the card on the right. Nothing is sent " +
           "onward until you approve it.",
@@ -808,6 +835,43 @@ export class ChatService {
       lines.push(`${product.name} at ${product.rate_label} — ${label}`);
     }
     return (lines.length > 0 ? lines : [...SAMPLE_PRICE_LINES]).join("; ");
+  }
+
+  /**
+   * Answer a message that matched no governed intent, mid-workflow.
+   * When a model is configured it may write this reply; any failure —
+   * or no model at all — falls back to the scripted line for the
+   * current step. A model answer changes nothing: the session stays
+   * at its step, nothing is written to memory, and no proposal or
+   * approval is created — only the salesperson's governed actions
+   * (intake details, a confirmation, a correction, a forget, the
+   * Approve button) move the workflow.
+   */
+  private async conversational(
+    session: Session,
+    account: StoredAccount,
+    text: string,
+    fallback: string,
+  ): Promise<ChatResult> {
+    if (this.model !== undefined) {
+      try {
+        const reply = await this.model.complete(
+          `You are the assistant in a governed sales-memory demo. The ` +
+            `salesperson is working on the account "${account.name}" ` +
+            `and is partway through a governed workflow (current ` +
+            `step: ${session.step}). Answer briefly and helpfully. ` +
+            `You cannot write memory, propose, or approve anything ` +
+            `yourself — only the salesperson's workflow actions do ` +
+            `that. Prices are sample prices. The salesperson says: ` +
+            text,
+        );
+        return this.withPending(session, reply);
+      } catch {
+        // Fall through to the scripted reply: a model failure must
+        // never break the conversation.
+      }
+    }
+    return this.withPending(session, fallback);
   }
 
   /**
