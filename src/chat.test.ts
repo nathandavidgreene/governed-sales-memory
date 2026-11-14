@@ -40,8 +40,8 @@ const INTAKE =
   "and the budget is $40,000 a month.";
 
 /** The second salesperson's intake line, for their own account. */
-const INTAKE_JUNIPER =
-  "Juniper Lane Bakery: Sam is the owner, Lee runs operations, " +
+const INTAKE_CABOT_SHORE =
+  "Cabot Shore: Sam is the owner, Lee runs operations, " +
   "and the budget is $9,500 a month.";
 
 /** The environment the route tests run under: in-memory store allowed. */
@@ -146,7 +146,7 @@ describe("scripted chat demo path", () => {
       throw new Error("open failed");
     }
     const sessionId = opened.session.id;
-    await chat.handle(SP2, sessionId, INTAKE_JUNIPER);
+    await chat.handle(SP2, sessionId, INTAKE_CABOT_SHORE);
     const proposed = await chat.handle(SP2, sessionId, "go ahead");
     if (!proposed.ok) {
       throw new Error("proposal failed");
@@ -200,7 +200,7 @@ describe("the seeded account shape", () => {
     const second = await chat.openSession(SP2);
     expect(second.ok).toBe(true);
     if (second.ok) {
-      expect(second.session.accountId).toBe("acct_juniper");
+      expect(second.session.accountId).toBe("acct_cabot_shore");
     }
   });
 
@@ -427,11 +427,11 @@ describe("cross-owner isolation through chat", () => {
     const reply = await chat.handle(
       SP1,
       first.session.id,
-      "Show me the Juniper Lane Bakery account and who works there",
+      "Show me the Cabot Shore account and who works there",
     );
     expect(reply.ok).toBe(true);
     if (reply.ok) {
-      expect(reply.reply).not.toContain("Juniper");
+      expect(reply.reply).not.toContain("Cabot");
       expect(reply.reply).not.toContain("Sam");
       expect(reply.reply).not.toContain("Lee");
       expect(reply.step).toBe("intake");

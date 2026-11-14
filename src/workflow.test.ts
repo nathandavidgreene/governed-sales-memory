@@ -19,7 +19,7 @@ import { MemoryStore, type Store } from "./store";
 /**
  * Build a fresh memory service, log, outbox, and store over one seeded
  * store, so the seed accounts exist with their owners (acct_salesperson owns
- * acct_willow and acct_harbor, acct_salesperson_2 owns acct_juniper) and a test can
+ * acct_willow and acct_harbor, acct_salesperson_2 owns acct_cabot_shore) and a test can
  * assert on behaviour, stored state, outbox contents, and the recorded
  * evidence together.
  */

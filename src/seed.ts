@@ -12,7 +12,7 @@
  *   written as governed memory items, never read off the account.
  * - `acct_harbor` ("Harbor Street Media") belongs to the first
  *   salesperson too, so the second salesperson is the one refused on
- *   it; the second salesperson's own account is `acct_juniper`.
+ *   it; the second salesperson's own account is `acct_cabot_shore`.
  * - Products carry their own price wording in `rate_label` /
  *   `sample_label`; there is no separate pricing collection.
  * - The accounts collection also holds the salesperson rows themselves
@@ -111,9 +111,9 @@ export function seedState(): SeedState {
         sample: true,
       },
       {
-        id: "acct_juniper",
+        id: "acct_cabot_shore",
         owner_salesperson_id: "acct_salesperson_2",
-        name: "Juniper Lane Bakery (sample account)",
+        name: "Cabot Shore (sample account)",
         sample: true,
       },
     ],
