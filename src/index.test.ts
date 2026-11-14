@@ -23,6 +23,23 @@ describe("worker", () => {
     expect(response.status).toBe(404);
   });
 
+  /**
+   * With no database configured and no explicit in-memory allowance,
+   * a /memory route fails closed: a JSON 500, never a silently
+   * in-memory answer and never a thrown stack trace.
+   */
+  it("answers /memory with a JSON error when no store is configured", async () => {
+    const response = await worker.fetch(
+      new Request("https://x.test/memory/anything?as=sp-1"),
+      {},
+    );
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "internal error",
+    });
+  });
+
   /** GET /seed serves both sample salespeople in its response body. */
   it("serves the seed state with both salespeople", async () => {
     const response = await worker.fetch(new Request("https://x.test/seed"));

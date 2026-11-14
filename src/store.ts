@@ -44,6 +44,22 @@ export interface Store {
    * Returns an empty list when the collection does not exist.
    */
   list(collection: string): Promise<JsonRecord[]>;
+
+  /**
+   * Return the most recently inserted record in `collection`, or
+   * `undefined` when the collection is empty or does not exist.
+   * Optional: stores that can answer cheaply provide it so hot paths
+   * (the change log's append) do not have to list a whole collection
+   * just to find its tail.
+   */
+  last?(collection: string): Promise<JsonRecord | undefined>;
+
+  /**
+   * Release any resources the store holds (connections, clients).
+   * Optional: stores with nothing to release omit it. Callers close a
+   * store when the work that created it — one request — is finished.
+   */
+  close?(): Promise<void>;
 }
 
 /**
@@ -104,5 +120,19 @@ export class MemoryStore implements Store {
       return [];
     }
     return [...bucket.values()].map((record) => ({ ...record }));
+  }
+
+  /**
+   * See `Store.last`. The in-memory store keeps insertion order, so
+   * the tail is simply the most recently stored record. The returned
+   * record is a copy, not a live reference.
+   */
+  async last(collection: string): Promise<JsonRecord | undefined> {
+    const bucket = this.collections.get(collection);
+    if (bucket === undefined || bucket.size === 0) {
+      return undefined;
+    }
+    const records = [...bucket.values()];
+    return { ...records[records.length - 1] };
   }
 }

@@ -71,4 +71,22 @@ describe("MemoryStore", () => {
       action: "remember",
     });
   });
+
+  /** The tail lookup returns the most recently stored record. */
+  it("returns the most recently stored record from last", async () => {
+    const store = new MemoryStore();
+    await store.insert("change_log", "1", { _id: "1", action: "remember" });
+    await store.insert("change_log", "2", { _id: "2", action: "approve" });
+    await expect(store.last("change_log")).resolves.toEqual({
+      _id: "2",
+      action: "approve",
+    });
+  });
+
+  /** The tail lookup on an empty or missing collection is undefined. */
+  it("returns undefined from last for an empty collection", async () => {
+    const store = new MemoryStore();
+    await expect(store.last("change_log")).resolves.toBeUndefined();
+    await expect(store.last("nope")).resolves.toBeUndefined();
+  });
 });

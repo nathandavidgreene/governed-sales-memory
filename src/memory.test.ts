@@ -223,6 +223,13 @@ describe("MemoryService approve flow", () => {
 
 describe("memory routes", () => {
   /**
+   * The routes run on the store the environment selects; these tests
+   * opt into the in-memory store with the explicit dev flag, the only
+   * way the factory allows it without a connection string.
+   */
+  const devEnv = { ALLOW_IN_MEMORY_STORE: "true" };
+
+  /**
    * POST /memory?as= stores an item for the `as` caller — an owner
    * field inside the body is never trusted — and the owner can GET it
    * back by id.
@@ -239,10 +246,12 @@ describe("memory routes", () => {
           text: "Sample route note.",
         }),
       }),
+      devEnv,
     );
     expect(post.status).toBe(201);
     const get = await worker.fetch(
       new Request("https://x.test/memory/route-item-1?as=sp-1"),
+      devEnv,
     );
     expect(get.status).toBe(200);
     await expect(get.json()).resolves.toMatchObject({
@@ -259,9 +268,11 @@ describe("memory routes", () => {
   it("answers cross-owner and missing GETs with one identical 404", async () => {
     const crossOwner = await worker.fetch(
       new Request("https://x.test/memory/route-item-1?as=sp-2"),
+      devEnv,
     );
     const missing = await worker.fetch(
       new Request("https://x.test/memory/never-existed?as=sp-2"),
+      devEnv,
     );
     expect(crossOwner.status).toBe(404);
     expect(missing.status).toBe(404);
@@ -280,6 +291,7 @@ describe("memory routes", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ kind: "note", text: "No owner named." }),
       }),
+      devEnv,
     );
     expect(post.status).toBe(400);
     await expect(post.json()).resolves.toMatchObject({ ok: false });
@@ -292,6 +304,7 @@ describe("memory routes", () => {
   it("answers 400 on a malformed percent escape in the URL", async () => {
     const get = await worker.fetch(
       new Request("https://x.test/memory/%E0%A4%A?as=sp-1"),
+      devEnv,
     );
     expect(get.status).toBe(400);
     await expect(get.json()).resolves.toMatchObject({ ok: false });

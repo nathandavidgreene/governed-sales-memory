@@ -4,3 +4,8 @@ name = "governed-sales-memory"
 main = "src/index.ts"
 compatibility_date = "2026-11-01"
 compatibility_flags = ["nodejs_compat"]
+
+# Plain variables only. The connection string stays a Worker secret,
+# set with: wrangler secret put MONGODB_URI
+[vars]
+MONGODB_DB = "sales_memory"

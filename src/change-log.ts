@@ -135,6 +135,24 @@ export class ChangeLog {
   }
 
   /**
+   * Return the current tail entry, or `undefined` when the log is
+   * empty. Uses the store's tail lookup when it offers one, so an
+   * append does not read the whole log just to chain onto its end;
+   * falls back to listing only for stores without one. (The full read
+   * stays in `entries()`/`verify()`, where every entry is the point.)
+   */
+  private async tail(): Promise<ChangeLogEntry | undefined> {
+    if (this.store.last !== undefined) {
+      const raw = await this.store.last(CHANGE_LOG);
+      return raw === undefined
+        ? undefined
+        : (raw as unknown as ChangeLogEntry);
+    }
+    const existing = await this.entries();
+    return existing[existing.length - 1];
+  }
+
+  /**
    * The append itself, run one at a time by the queue.
    * Chains onto the current last entry, or onto "GENESIS" when the log
    * is empty. Side effect: one insert into the store, never an update.
@@ -146,8 +164,7 @@ export class ChangeLog {
     detail: string,
   ): Promise<ChangeLogEntry> {
     for (let attempt = 1; attempt <= MAX_APPEND_ATTEMPTS; attempt++) {
-      const existing = await this.entries();
-      const last = existing[existing.length - 1];
+      const last = await this.tail();
       const unsigned: Omit<ChangeLogEntry, "hash"> = {
         _id: last === undefined ? "1" : String(Number(last._id) + 1),
         at: new Date().toISOString(),
