@@ -194,6 +194,30 @@ describe("MemoryService propose (account ownership)", () => {
   });
 
   /**
+   * Approval state lives in its own "approvals" collection — never
+   * inside a session — keyed by `_id` and carrying
+   * `owner_salesperson_id`, matching the seed vocabulary.
+   */
+  it("stores approval state in its own approvals collection", async () => {
+    const { service, store } = await freshWorkflow();
+    await service.propose("sp-1", {
+      id: "chg-1",
+      description: "Send the sample proposal to the account.",
+      accountId: "acct-north-bakery",
+    });
+    const stored = await store.get("approvals", "chg-1");
+    expect(stored).toMatchObject({
+      _id: "chg-1",
+      id: "chg-1",
+      owner_salesperson_id: "sp-1",
+      accountId: "acct-north-bakery",
+      status: "pending",
+    });
+    expect(stored).not.toHaveProperty("ownerId");
+    await expect(store.list("sessions")).resolves.toEqual([]);
+  });
+
+  /**
    * Proposing against the other salesperson's account is refused with
    * the generic answer, a "refuse" entry naming the proposer is
    * recorded against the account, and no approval is stored.
