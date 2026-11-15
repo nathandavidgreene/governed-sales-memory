@@ -1,0 +1,11 @@
+// Cloudflare Worker that serves the built documentation site as static
+// assets. Separate from the app Worker: no code, no bindings, no secrets.
+// Build first (npm run docs:build), then: npx wrangler deploy -c docs/wrangler.docs.jsonc
+{
+  "name": "governed-sales-memory-docs",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "../site",
+    "not_found_handling": "404-page"
+  }
+}

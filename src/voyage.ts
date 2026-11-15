@@ -8,8 +8,7 @@
  * part of an error message. Stored text is embedded as a "document"
  * and a search query as a "query", as Voyage recommends.
  *
- * The model default is voyage-3 (1024 dimensions). That choice still
- * needs Nathan's confirmation: the vector index in
+ * The model is voyage-3 (1024 dimensions). The vector index in
  * db/vector-index.json is built for 1024 dimensions, so a different
  * model means a different index. Change it in one place —
  * VOYAGE_MODEL below — and rebuild the index to match.
@@ -22,7 +21,7 @@ export const VOYAGE_API_URL = "https://api.voyageai.com/v1/embeddings";
 
 /**
  * The Voyage model used to embed memory text and search queries.
- * Default voyage-3; needs Nathan's confirmation before the demo.
+ * voyage-3, matching the 1024-dimension vector index.
  */
 export const VOYAGE_MODEL = "voyage-3";
 

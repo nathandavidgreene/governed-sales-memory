@@ -1,0 +1,67 @@
+# MkDocs configuration for the documentation site.
+# Build with: npm run docs:build (regenerates docs/api/ from the docstrings first).
+site_name: Governed Sales Memory
+site_description: A sales agent whose memory is owner-scoped, correctable, forgettable, and approved by a human.
+repo_url: https://github.com/nathandavidgreene/governed-sales-memory
+repo_name: governed-sales-memory
+edit_uri: ""
+docs_dir: docs
+site_dir: site
+exclude_docs: |
+  wrangler.docs.jsonc
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+  palette:
+    - scheme: default
+      primary: green
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: green
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - API reference:
+      - Overview: api/index.md
+      - Worker entry point: api/src-index.md
+      - Chat agent: api/src-chat.md
+      - Model client: api/src-model.md
+      - Memory service: api/src-memory.md
+      - Session service: api/src-session.md
+      - Search: api/src-search.md
+      - Search route: api/src-search-route.md
+      - Voyage embeddings: api/src-voyage.md
+      - Change log: api/src-change-log.md
+      - Outbox: api/src-outbox.md
+      - Store seam: api/src-store.md
+      - Atlas store: api/src-atlas-store.md
+      - Store factory: api/src-factory.md
+      - Seed data: api/src-seed.md
+      - App page: api/src-page.md
+      - "Script: apply indexes": api/scripts-apply-indexes.md
+      - "Script: embed memories": api/scripts-embed-memories.md
+      - "Script: generate API docs": api/scripts-gen-api-docs.md

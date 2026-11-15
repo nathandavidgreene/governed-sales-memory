@@ -13,9 +13,8 @@
  * the status and the batch left unwritten; a memory without text is
  * skipped, counted, and reported, and the run exits non-zero so a
  * seed data problem is not hidden behind success. No secret is ever
- * printed. Model note: voyage-3 (1024 dimensions) is the default,
- * matching db/vector-index.json, and still needs Nathan's
- * confirmation — the same constants live in src/voyage.ts; keep the
+ * printed. Model note: voyage-3 (1024 dimensions) is used,
+ * matching db/vector-index.json — the same constants live in src/voyage.ts; keep the
  * two in sync.
  *
  *   MONGODB_URI=... VOYAGE_API_KEY=... node scripts/embed-memories.mjs
