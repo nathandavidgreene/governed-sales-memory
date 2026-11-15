@@ -10,3 +10,7 @@ dist/
 # OS / editor
 .DS_Store
 *.log
+
+# Docs site: generated API pages and build output
+docs/api/
+site/
